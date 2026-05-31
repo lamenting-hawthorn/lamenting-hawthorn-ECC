@@ -85,7 +85,7 @@ This repo is the raw code only. The guides explain everything.
 ### v1.10.1 — Stable Reliability Patch (May 2026)
 
 - **Stable-channel momentum while ECC 2.0 remains prerelease** — `1.10.1` keeps the public npm/release lane moving without overstating control-plane GA readiness.
-- **Continuous-learning reliability** — observer analysis now has a larger default turn budget for the 500-line analysis window, plus clearer warnings when legacy homunculus data exists outside the active ECC data path.
+- **Continuous-learning reliability** — observer analysis now has a larger default turn budget for the 500-line analysis window.
 - **Command and audit hardening** — `/instinct-status` resolves the active plugin root more reliably, and harness auditing handles missing package metadata more defensively.
 - **Repository-surface cleanup** — contribution and translated marketplace links now point at the current `affaan-m/ECC` public repo surface.
 

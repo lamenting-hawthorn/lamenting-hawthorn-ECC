@@ -10,7 +10,6 @@ This release keeps the public `latest` line moving while the larger ECC 2.0 cont
 
 - Hardened harness auditing around missing or malformed package metadata.
 - Increased the continuous-learning observer default turn budget so the default 500-line analysis window has enough room to complete.
-- Added an explicit warning when legacy `~/.claude/homunculus` data exists but the current CLI is reading from the XDG-based ECC data path.
 - Fixed `/instinct-status` plugin-root resolution so the command does not fall back to stale legacy install paths.
 - Updated contribution and translated marketplace links to the current `affaan-m/ECC` public repo surface.
 
