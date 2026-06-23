@@ -130,4 +130,9 @@ class TtlCleaner:
 # ------------------------------------------------------------------
 
 _cleaner = TtlCleaner()
-_cleaner.start()
+if os.environ.get("AGENT_ARCHITECTURE_DISABLE_TTL_CLEANER", "").lower() not in {
+    "1",
+    "true",
+    "yes",
+}:
+    _cleaner.start()

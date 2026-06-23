@@ -106,6 +106,13 @@ class ExportedToolCall:
 def tool_call_from_trace_event(event: dict[str, Any]) -> ExportedToolCall:
     status = str(event.get("status") or "unknown")
     success = True if status == "ok" else False if status == "error" else None
+    exported_status = (
+        "success"
+        if status == "ok"
+        else "error"
+        if status == "error"
+        else status
+    )
     return ExportedToolCall(
         id=str(event.get("id") or uuid4().hex),
         name=str(event.get("step_name") or "runtime_step"),
@@ -116,7 +123,7 @@ def tool_call_from_trace_event(event: dict[str, Any]) -> ExportedToolCall:
         result=event.get("error_message"),
         success=success,
         duration_ms=event.get("latency_ms"),
-        status="success" if status == "ok" else "error" if status == "error" else "unknown",
+        status=exported_status,
         error_type="runtime_error" if status == "error" else None,
     )
 
