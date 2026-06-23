@@ -1,3 +1,6 @@
+import json
+
+from examples.export_skillloop_trace import SAMPLE_TRACE_ID, run_sample_runtime_turn
 from src.trace_export import build_skillloop_trace, build_skillloop_trace_from_state
 
 
@@ -38,3 +41,31 @@ def test_skillloop_trace_export_requires_actor_in_state():
         assert "actor" in str(exc)
     else:
         raise AssertionError("missing actor should fail closed")
+
+
+def test_sample_runtime_turn_exports_ingestable_agent_architecture_trace(tmp_path):
+    output = run_sample_runtime_turn(tmp_path / "sample_runtime_turn_trace.jsonl")
+    records = [
+        json.loads(line)
+        for line in output.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+    assert len(records) == 1
+    trace = records[0]
+    assert trace["id"] == SAMPLE_TRACE_ID
+    assert trace["source"] == "agent_architecture"
+    assert trace["adapter"]["name"] == "agent_architecture_trace_export"
+    assert trace["metadata"]["actor"]["org_id"] == "sample_org"
+    assert trace["messages"][0]["role"] == "user"
+    assert trace["messages"][1]["role"] == "assistant"
+
+    tool_call_names = {
+        call["name"]
+        for call in trace["messages"][1]["tool_calls"]
+    }
+    assert {
+        "agent_memory_retrieval",
+        "model_answer",
+        "salience_gate",
+    } <= tool_call_names

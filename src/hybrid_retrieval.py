@@ -242,19 +242,15 @@ class HybridMemoryStore:
 
         # Generate embedding (cached)
         embedding = None
-        embedding_latency = 0
         if not skip_vector:
-            emb_start = perf_counter()
             embedding = _query_cache.get(query)
             if embedding is None:
                 embedding = generate_embedding(query)
                 if embedding is not None:
                     _query_cache.put(query, embedding)
-            embedding_latency = int((perf_counter() - emb_start) * 1000)
 
         with self._connect() as conn:
             # --- 1. FTS candidates ---------------------------------------------------
-            fts_start = perf_counter()
             fts_rows = conn.execute(
                 """
                 SELECT
@@ -275,13 +271,10 @@ class HybridMemoryStore:
                 """,
                 (query, user_id, org_id, org_id, query, limit * 3),
             ).fetchall()
-            fts_latency = int((perf_counter() - fts_start) * 1000)
 
             # --- 2. Vector candidates (if applicable) ---------------------------------
             vector_rows: list[dict[str, Any]] = []
-            vector_latency = 0
             if embedding is not None:
-                vec_start = perf_counter()
                 vector_rows = conn.execute(
                     """
                     SELECT
@@ -297,7 +290,6 @@ class HybridMemoryStore:
                     (str(embedding), user_id, org_id, org_id,
                      str(embedding), limit * 3),
                 ).fetchall()
-                vector_latency = int((perf_counter() - vec_start) * 1000)
 
             # --- 3. RRF fusion (skip for trivial/short if no vectors) -----------------
             method = "fts_only" if not vector_rows else "hybrid"

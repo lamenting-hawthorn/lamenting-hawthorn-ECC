@@ -140,7 +140,7 @@ when changing provider or model.
 
 ## SkillLoop Export
 
-Generate a trace JSONL file:
+Generate a trace JSONL file from a real local runtime turn:
 
 ```bash
 python examples/export_skillloop_trace.py
@@ -154,6 +154,8 @@ skillloop --path /path/to/project ingest agent-architecture examples/out/sample_
 
 The export is read-only governance data. SkillLoop does not write directly into
 runtime memory.
+
+Full walkthrough: `docs/SKILLLOOP_INGEST_EXAMPLE.md`.
 
 ## Validation
 

@@ -295,7 +295,7 @@ class GraphMemory:
             # Find edges where any entity appears as source or target
             entity_list = list(entities)
             rows = conn.execute(
-                f"""
+                """
                 SELECT DISTINCT
                     CASE
                         WHEN me.source_id = ANY(%s) THEN me.target_id

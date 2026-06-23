@@ -1,0 +1,19 @@
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [
+    "examples/out",
+]
+
+[tool.ruff.lint]
+select = [
+    "F",
+]
+ignore = [
+    # The public copy still contains legacy script-style modules with late
+    # imports and smoke-test imports. Keep the first lint gate focused on
+    # undefined names and obvious correctness issues; broaden this after a
+    # dedicated formatting cleanup.
+    "F401",
+    "F811",
+]
