@@ -13,9 +13,6 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.graph import build_graph
-from src.trace_export import build_skillloop_trace_from_state, write_trace_jsonl
-
 
 DEFAULT_OUTPUT = ROOT / "examples" / "out" / "sample_runtime_turn_trace.jsonl"
 SAMPLE_TRACE_ID = "sample-runtime-turn-001"
@@ -36,6 +33,9 @@ def _with_default_env() -> dict[str, str | None]:
         "MEMORY_BACKEND": os.environ.get("MEMORY_BACKEND"),
         "CHECKPOINTER": os.environ.get("CHECKPOINTER"),
         "AGENT_ORG_ID": os.environ.get("AGENT_ORG_ID"),
+        "AGENT_ARCHITECTURE_DISABLE_TTL_CLEANER": os.environ.get(
+            "AGENT_ARCHITECTURE_DISABLE_TTL_CLEANER"
+        ),
         "DATABASE_URL": os.environ.get("DATABASE_URL"),
         "TRACE_STORE_DISABLED": os.environ.get("TRACE_STORE_DISABLED"),
         "LLM_API_KEY": os.environ.get("LLM_API_KEY"),
@@ -45,6 +45,7 @@ def _with_default_env() -> dict[str, str | None]:
     os.environ["MEMORY_BACKEND"] = "fake"
     os.environ["CHECKPOINTER"] = "memory"
     os.environ["AGENT_ORG_ID"] = SAMPLE_ACTOR["org_id"]
+    os.environ["AGENT_ARCHITECTURE_DISABLE_TTL_CLEANER"] = "1"
     os.environ["TRACE_STORE_DISABLED"] = "1"
     os.environ.pop("DATABASE_URL", None)
     os.environ.pop("LLM_API_KEY", None)
@@ -96,7 +97,14 @@ def _sample_events(result: dict[str, Any]) -> list[dict[str, Any]]:
 def run_sample_runtime_turn(output: Path = DEFAULT_OUTPUT) -> Path:
     """Run one local graph turn and write the SkillLoop JSONL artifact."""
     previous_env = _with_default_env()
+    native_records: list[Any] | None = None
     try:
+        from src.graph import build_graph
+        from src.hermes_native_memory import HermesNativeMemoryStore
+        from src.trace_export import build_skillloop_trace_from_state, write_trace_jsonl
+
+        native_records = list(HermesNativeMemoryStore._records)
+        HermesNativeMemoryStore.clear()
         graph = build_graph()
         result = graph.invoke(
             {
@@ -113,6 +121,10 @@ def run_sample_runtime_turn(output: Path = DEFAULT_OUTPUT) -> Path:
         trace = build_skillloop_trace_from_state(result, events=_sample_events(result))
         return write_trace_jsonl(trace, output)
     finally:
+        if native_records is not None:
+            from src.hermes_native_memory import HermesNativeMemoryStore
+
+            HermesNativeMemoryStore._records = native_records
         _restore_env(previous_env)
 
 

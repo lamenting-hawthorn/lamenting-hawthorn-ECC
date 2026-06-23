@@ -1,7 +1,8 @@
 import json
 import os
 
-from examples.export_skillloop_trace import SAMPLE_TRACE_ID, run_sample_runtime_turn
+from examples.export_skillloop_trace import SAMPLE_ACTOR, SAMPLE_TRACE_ID, run_sample_runtime_turn
+from src.hermes_native_memory import HermesNativeMemoryStore
 from src.trace_export import build_skillloop_trace, build_skillloop_trace_from_state
 
 
@@ -45,8 +46,19 @@ def test_skillloop_trace_export_requires_actor_in_state():
 
 
 def test_sample_runtime_turn_exports_ingestable_agent_architecture_trace(tmp_path):
+    existing_records = list(HermesNativeMemoryStore._records)
+    preexisting_id = HermesNativeMemoryStore().write(
+        actor_id=SAMPLE_ACTOR["actor_id"],
+        org_id=SAMPLE_ACTOR["org_id"],
+        role=SAMPLE_ACTOR["role"],
+        content="Remember this: preexisting sample state should be restored.",
+    )
     previous_env = {
+        "AGENT_ARCHITECTURE_DISABLE_TTL_CLEANER": os.environ.get(
+            "AGENT_ARCHITECTURE_DISABLE_TTL_CLEANER"
+        ),
         "DATABASE_URL": os.environ.get("DATABASE_URL"),
+        "TRACE_STORE_DISABLED": os.environ.get("TRACE_STORE_DISABLED"),
         "LLM_API_KEY": os.environ.get("LLM_API_KEY"),
         "LLM_BASE_URL": os.environ.get("LLM_BASE_URL"),
         "LLM_MODEL": os.environ.get("LLM_MODEL"),
@@ -64,6 +76,11 @@ def test_sample_runtime_turn_exports_ingestable_agent_architecture_trace(tmp_pat
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
+
+    assert [record.id for record in HermesNativeMemoryStore._records] == [
+        *[record.id for record in existing_records],
+        preexisting_id,
+    ]
 
     records = [
         json.loads(line)

@@ -7,6 +7,7 @@ The example is intentionally offline:
 
 - `MEMORY_BACKEND=fake`
 - `CHECKPOINTER=memory`
+- `AGENT_ARCHITECTURE_DISABLE_TTL_CLEANER=1`
 - `TRACE_STORE_DISABLED=1`
 - local fallback model behavior when no LLM key is configured
 
