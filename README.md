@@ -93,3 +93,9 @@ python -B smoke_test.py
 ```
 
 Also run the checklist in `docs/RELEASE_CHECKLIST.md`.
+
+## Project Policy
+
+- Contribution guide: `CONTRIBUTING.md`
+- Security reporting: `SECURITY.md`
+- License: `LICENSE`
