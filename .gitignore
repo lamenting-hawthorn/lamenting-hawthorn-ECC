@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Secrets and local config
+.env
+.env.*
+!.env.example
+
+# Databases and local state
+*.db
+*.sqlite
+*.sqlite3
+*.log
+.skillloop/
+examples/out/
+
+# Build and package artifacts
+build/
+dist/
+*.tar.gz
+*.zip
+
+# OS/editor files
+.DS_Store
+.idea/
+.vscode/
+
+# Local-only folders
+local_testing_workspace/
+client_handoff/
