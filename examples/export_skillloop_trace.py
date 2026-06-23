@@ -36,12 +36,20 @@ def _with_default_env() -> dict[str, str | None]:
         "MEMORY_BACKEND": os.environ.get("MEMORY_BACKEND"),
         "CHECKPOINTER": os.environ.get("CHECKPOINTER"),
         "AGENT_ORG_ID": os.environ.get("AGENT_ORG_ID"),
+        "DATABASE_URL": os.environ.get("DATABASE_URL"),
+        "TRACE_STORE_DISABLED": os.environ.get("TRACE_STORE_DISABLED"),
+        "LLM_API_KEY": os.environ.get("LLM_API_KEY"),
+        "LLM_BASE_URL": os.environ.get("LLM_BASE_URL"),
         "LLM_MODEL": os.environ.get("LLM_MODEL"),
     }
     os.environ["MEMORY_BACKEND"] = "fake"
     os.environ["CHECKPOINTER"] = "memory"
     os.environ["AGENT_ORG_ID"] = SAMPLE_ACTOR["org_id"]
-    os.environ.setdefault("LLM_MODEL", "local_fallback")
+    os.environ["TRACE_STORE_DISABLED"] = "1"
+    os.environ.pop("DATABASE_URL", None)
+    os.environ.pop("LLM_API_KEY", None)
+    os.environ.pop("LLM_BASE_URL", None)
+    os.environ["LLM_MODEL"] = "local_fallback"
     return previous
 
 
@@ -54,6 +62,8 @@ def _restore_env(previous: dict[str, str | None]) -> None:
 
 
 def _sample_events(result: dict[str, Any]) -> list[dict[str, Any]]:
+    retrieved_context = result.get("retrieved_context")
+    fake_no_results = retrieved_context in {"", None, "No durable memory retrieved yet."}
     return [
         {
             "id": "sample-event-retrieve-memory",
@@ -61,15 +71,16 @@ def _sample_events(result: dict[str, Any]) -> list[dict[str, Any]]:
             "status": "ok",
             "source": "fake_memory",
             "latency_ms": 0,
-            "results_count": 0 if result.get("retrieved_context") else None,
+            "results_count": 0 if fake_no_results else None,
         },
         {
             "id": "sample-event-model-answer",
             "step_name": "model_answer",
-            "status": "ok",
+            "status": "fallback",
             "source": os.environ.get("LLM_MODEL", "local_fallback"),
             "latency_ms": 0,
             "results_count": None,
+            "error_message": "LLM_API_KEY was suppressed for the offline sample; used fallback response.",
         },
         {
             "id": "sample-event-memory-write",

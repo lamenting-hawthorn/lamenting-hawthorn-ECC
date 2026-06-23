@@ -149,7 +149,7 @@ python examples/export_skillloop_trace.py
 Then ingest it from a SkillLoop checkout:
 
 ```bash
-skillloop --path /path/to/project ingest agent-architecture examples/out/sample_trace.jsonl
+skillloop --path /path/to/project ingest agent-architecture examples/out/sample_runtime_turn_trace.jsonl
 ```
 
 The export is read-only governance data. SkillLoop does not write directly into

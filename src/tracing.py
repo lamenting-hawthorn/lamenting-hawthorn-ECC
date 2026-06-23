@@ -54,6 +54,9 @@ class TraceStore:
         Tracing must never break the user path. If the database is not migrated
         yet, callers continue normally and diagnostics can be enabled later.
         """
+        if os.environ.get("TRACE_STORE_DISABLED", "").lower() in {"1", "true", "yes"}:
+            return None
+
         try:
             with self._connect() as conn:
                 row = conn.execute(

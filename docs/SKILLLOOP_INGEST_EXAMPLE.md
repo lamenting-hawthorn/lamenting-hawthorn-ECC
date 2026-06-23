@@ -7,7 +7,12 @@ The example is intentionally offline:
 
 - `MEMORY_BACKEND=fake`
 - `CHECKPOINTER=memory`
+- `TRACE_STORE_DISABLED=1`
 - local fallback model behavior when no LLM key is configured
+
+The script temporarily suppresses inherited `DATABASE_URL`, `LLM_API_KEY`, and
+`LLM_BASE_URL` values while the sample turn runs, then restores the caller's
+environment.
 
 ## 1. Export A Runtime Turn
 
