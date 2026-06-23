@@ -88,8 +88,7 @@ runtime memory.
 Before pushing to GitHub:
 
 ```bash
-python -B -m py_compile event_worker.py sync_wiki.py langgraph_deep_path.py src/*.py src/adapters/*.py
-python -B -m pytest -p no:cacheprovider src/test_trace_export.py src/test_adapters.py -q
+python -B -m pytest -p no:cacheprovider src -q
 python -B smoke_test.py
 ```
 
