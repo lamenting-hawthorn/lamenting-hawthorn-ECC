@@ -138,7 +138,21 @@ This is a local/public reference implementation. It is not a hosted production
 service out of the box. Production use still needs deployment-specific identity,
 secrets management, monitoring, backup/restore, and RLS regression coverage.
 
-## Setup
+## Quick Start
+
+Run `./install.sh` and follow the prompts. It checks for Python 3.11+,
+creates a virtual environment, installs dependencies, sets up Postgres,
+writes `.env`, and optionally initializes SkillLoop.
+
+Then verify everything works:
+
+```bash
+python -B smoke_test.py
+```
+
+## Setup (Manual)
+
+If you prefer to set up manually instead of using `install.sh`:
 
 ```bash
 python -m venv .venv
@@ -402,7 +416,7 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agent_architecture.n
 - `.hermes/SKILLOOP_CONNECTOR_DESIGN.md` — SkillLoop connector design
 - `.hermes/ENTERPRISE_DIFFERENCES.md` — MVP vs multi-tenant gap analysis
 - `.hermes/PERSONAL_USE.md` — Single-user build scope
-- `.hermes/STATE.md` — Current loop state
+- `docs/internal/STATE.md` — Internal development log (not for public use)
 
 ## Project Policy
 
