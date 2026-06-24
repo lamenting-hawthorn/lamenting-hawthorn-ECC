@@ -98,6 +98,12 @@ def salience_gate(event: Dict) -> Tuple[bool, Optional[str]]:
 
     # Rule 2: minimum content
     payload = event.get("payload", {}) or {}
+    if isinstance(payload, str):
+        try:
+            import json
+            payload = json.loads(payload)
+        except Exception:
+            payload = {}
     text = (payload.get("text") or "").strip()
     has_tool_calls = bool(payload.get("tool_calls"))
 
@@ -136,6 +142,12 @@ def classify_event(event: Dict) -> Tuple[str, str, float]:
     for ambiguous cases.
     """
     payload = event.get("payload", {}) or {}
+    if isinstance(payload, str):
+        try:
+            import json
+            payload = json.loads(payload)
+        except Exception:
+            payload = {}
     text = (payload.get("text") or "").lower().strip()
     event_type = event.get("event_type", "")
 
@@ -175,10 +187,9 @@ def resolve_visibility(role: str) -> str:
     return "team"
 
 
-def calculate_expiry(memory_type: str) -> Optional[str]:
+def calculate_expiry(memory_type: str) -> Optional[datetime]:
     if memory_type == "episodic":
-        dt = datetime.now(timezone.utc) + timedelta(days=30)
-        return dt.isoformat()
+        return datetime.now(timezone.utc) + timedelta(days=30)
     if memory_type in ("semantic", "procedural"):
         return None  # permanent
     return None
@@ -333,6 +344,17 @@ class EventWorker:
 
     async def fetch_unprocessed(self) -> List[Dict]:
         """Atomically claim the next batch of unprocessed events."""
+        # Cooldown: reset stale poison-pilled events so they can retry
+        await self._db.execute(
+            """
+            UPDATE event_store.events
+            SET processing_attempts = 0,
+                processing_started_at = NULL,
+                processing_error = NULL
+            WHERE processed_at IS NULL
+              AND processing_attempts >= 5
+            """
+        )
         rows = await self._db.fetch(
             """
             WITH next_events AS (
@@ -420,7 +442,14 @@ class EventWorker:
 
         # 3. Classify
         memory_type, category, confidence = classify_event(event)
-        content = (event.get("payload", {}) or {}).get("text", "") or ""
+        payload = event.get("payload", {}) or {}
+        if isinstance(payload, str):
+            try:
+                import json
+                payload = json.loads(payload)
+            except Exception:
+                payload = {}
+        content = (payload.get("text", "") or "")
 
         if not content:
             # No text to store — mark processed but don't write memory
