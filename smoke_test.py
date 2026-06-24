@@ -48,6 +48,9 @@ def main() -> None:
             raise AssertionError(f"public repo should not contain {blocked}")
 
     generated = list(ROOT.rglob("*.pyc")) + list(ROOT.rglob("*.tar.gz")) + list(ROOT.rglob(".DS_Store"))
+    # Exclude generated directories/files that should not be committed
+    skip_names = {".venv", ".ruff_cache", "__pycache__", ".pytest_cache", ".git", ".DS_Store"}
+    generated = [p for p in generated if not any(part in skip_names for part in p.parts)]
     if generated:
         raise AssertionError(f"generated/private artifacts found: {generated[:5]}")
 

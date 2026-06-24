@@ -241,7 +241,7 @@ class SkillLoopReader:
             if proposal.score == 0 or proposal.trace_id == "skillloop_import":
                 db_row = self._lookup_proposal(stem)
                 if db_row:
-                    payload = self._parse_proposal_payload(db_row.get("payload", "{}"))
+                    _payload = self._parse_proposal_payload(db_row.get("payload", "{}"))
                     if proposal.score == 0:
                         # Try to get score from evaluations table via trace_id
                         db = self._db()

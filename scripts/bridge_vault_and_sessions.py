@@ -118,7 +118,6 @@ def _parse_frontmatter(text: str) -> Tuple[Dict[str, Any], str, str]:
 
 def _is_excluded_anchor(rel_path: str, frontmatter: Dict[str, Any], raw_content: str) -> bool:
     """Exclude MOCs, indexes, READMEs, and files with empty content."""
-    rp_lower = rel_path.lower()
     name = Path(rel_path).name.lower()
     # Exclude by name patterns
     if "moc" in name or "moc" in frontmatter.get("type", "").lower():
@@ -284,9 +283,9 @@ class VaultScanner:
                 print(json.dumps({"event": "vault_read_error", "path": rel, "error": str(e)}))
                 continue
             try:
-                fm, body, raw_full = _parse_frontmatter(raw)
+                fm, _body, raw_full = _parse_frontmatter(raw)
             except Exception:
-                fm, body, raw_full = {}, raw, raw
+                fm, _body, raw_full = {}, raw, raw
             # Exclude MOCs, indexes, READMEs, empty files
             if _is_excluded_anchor(rel, fm, raw_full):
                 continue
