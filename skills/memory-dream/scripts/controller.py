@@ -295,7 +295,6 @@ def adopt_run(
                         skipped += 1
                         _mark_proposal(conn, prop["id"], "rejected",
                                        rationale_extra=f"skipped: confidence {confidence:.2f} < {min_confidence}")
-                        rejected += 1
                         continue
 
                     action = prop["action"]
@@ -331,14 +330,10 @@ def adopt_run(
                         skipped += 1
                         _mark_proposal(conn, prop["id"], "rejected",
                                        rationale_extra=f"unknown action: {action}")
-                        rejected += 1
                 except Exception as exc:
                     errors.append(f"proposal {prop['id']}: {exc}")
-                    skipped += 1
-                    # Mark this proposal as rejected and re-raise so the
-                    # transaction rolls back. The user can re-run after
-                    # fixing the underlying issue.
-                    raise
+                    _mark_proposal(conn, prop["id"], "rejected",
+                                   rationale_extra=f"error during apply: {exc}")
 
             # Update run counters.
             conn.execute(

@@ -53,6 +53,25 @@ DEFAULT_MODEL = os.environ.get("DREAM_MODEL", os.environ.get("LLM_MODEL", "deeps
 DEFAULT_ACTOR_ID = os.environ.get("ACTOR_ID", "u_owner")
 
 
+def _sanitize_excerpt(text: str, max_chars: int = 600) -> str:
+    """Sanitize session excerpt text before it enters the LLM prompt.
+
+    Strips control characters (except newlines/tabs), escapes curly
+    braces so user text cannot be interpreted as Python ``str.format()``
+    placeholders, and truncates to ``max_chars``.
+    """
+    if not text:
+        return ""
+    # Keep printable chars, newlines, tabs; drop nulls and control chars.
+    text = "".join(
+        ch for ch in text
+        if ch in ("\n", "\t") or (32 <= ord(ch) <= 126) or ord(ch) > 159
+    )
+    # Escape braces so they survive str.format() in the prompt template.
+    text = text.replace("{", "{{").replace("}", "}}")
+    return text[:max_chars]
+
+
 # ---------------------------------------------------------------------------
 # Subcommands
 # ---------------------------------------------------------------------------
@@ -99,7 +118,7 @@ def cmd_run(args) -> int:
     if not digests:
         print("   (no recent sessions with extractable user text)")
     excerpts = "\n\n---\n\n".join(
-        f"### Session {d.session_id}\n\n{d.text}" for d in digests
+        f"### Session {d.session_id}\n\n{_sanitize_excerpt(d.text)}" for d in digests
     ) or "(no sessions)"
 
     # 3. Pre-LLM dedup pass (so the LLM sees a smaller prompt).

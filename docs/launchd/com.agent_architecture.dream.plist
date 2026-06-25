@@ -32,17 +32,24 @@
         <string>owner:&lt;USER&gt;</string>
     </array>
     <key>StartCalendarInterval</key>
-    <dict>
-        <key>Minute</key>
-        <integer>0</integer>
-        <key>Hour</key>
-        <integer>11</integer>
-        <key>Day</key>
-        <array>
+    <array>
+        <dict>
+            <key>Minute</key>
+            <integer>0</integer>
+            <key>Hour</key>
+            <integer>11</integer>
+            <key>Day</key>
             <integer>1</integer>
+        </dict>
+        <dict>
+            <key>Minute</key>
+            <integer>0</integer>
+            <key>Hour</key>
+            <integer>11</integer>
+            <key>Day</key>
             <integer>15</integer>
-        </array>
-    </dict>
+        </dict>
+    </array>
     <key>EnvironmentVariables</key>
     <dict>
         <key>DATABASE_URL</key>
