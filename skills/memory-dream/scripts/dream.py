@@ -325,7 +325,7 @@ def cmd_runs(args) -> int:
             """
             select run_id, started_at, finished_at, status, model,
                    rows_scanned, proposals_count, adopted_count,
-                   rejected_count, summary
+                   rejected_count, skipped_count, summary
             from memory.dream_runs
             order by started_at desc
             limit %s
@@ -339,7 +339,10 @@ def cmd_runs(args) -> int:
         print(
             f"  {r['run_id']}  {r['started_at']}  "
             f"status={r['status']:9s}  proposals={r['proposals_count']:3d}  "
-            f"adopted={r.get('adopted_count') or 0:3d}  model={r.get('model') or '?'}"
+            f"adopted={r.get('adopted_count') or 0:3d}  "
+            f"rejected={r.get('rejected_count') or 0:3d}  "
+            f"skipped={r.get('skipped_count') or 0:3d}  "
+            f"model={r.get('model') or '?'}"
         )
         if r.get("summary"):
             print(f"      {r['summary'][:100]}")

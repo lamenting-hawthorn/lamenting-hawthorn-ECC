@@ -342,17 +342,25 @@ def adopt_run(
                     _mark_proposal(conn, prop["id"], "rejected",
                                    rationale_extra=f"unknown action: {action}")
 
-            # Update run counters.
+            # Update run counters. ``rejected_count`` reflects the
+            # number of proposal rows whose ``reviewer_action`` is
+            # 'rejected' (includes the skipped-by-confidence and
+            # unknown-action paths, which are also marked rejected
+            # in storage for audit). ``skipped_count`` is the
+            # count of proposals that did NOT execute an apply
+            # helper (low confidence or unknown action); it is a
+            # strict subset of ``rejected_count``.
             conn.execute(
                 """
                 update memory.dream_runs
                 set status = 'completed',
                     finished_at = now(),
                     adopted_count = %s,
-                    rejected_count = %s
+                    rejected_count = %s,
+                    skipped_count = %s
                 where run_id = %s
                 """,
-                (adopted, rejected, run_id),
+                (adopted, rejected, skipped, run_id),
             )
             # The transaction commits on context exit.
 

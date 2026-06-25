@@ -408,6 +408,14 @@ class TestSchemaAdditions(unittest.TestCase):
             self.text,
             r"create table memory\.dream_runs[\s\S]+?\buser_id\b",
         )
+        # dream_runs must carry a skipped_count column so the run
+        # summary can accurately report skipped (low-confidence,
+        # unknown-action) proposals separately from rejected. See
+        # PR #2359 finding 11.
+        self.assertRegex(
+            self.text,
+            r"create table memory\.dream_runs[\s\S]+?\bskipped_count\b",
+        )
 
     def test_indexes(self):
         # At least one dream-specific index.
