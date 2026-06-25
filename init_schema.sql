@@ -249,6 +249,7 @@ create table memory.dream_runs (
     proposals_count     integer not null default 0,
     adopted_count       integer not null default 0,
     rejected_count      integer not null default 0,
+    skipped_count       integer not null default 0,
     summary             text,
     instructions        text,
     status              text not null default 'in_progress'
