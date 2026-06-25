@@ -24,21 +24,67 @@ live memory system.
 ## Architecture
 
 ```mermaid
-flowchart LR
-    U["User / Channel"] --> A["Adapter"]
-    A --> I["Identity Resolution"]
-    I --> G["LangGraph Runtime"]
-    G --> R["Hybrid Retrieval"]
-    R --> H["Hermes Memory"]
-    R --> P["Postgres Memory"]
-    H --> G
-    P --> G
-    G --> M["LLM Response"]
-    G --> S["Salience Gate"]
-    S --> W["Durable Memory Write"]
-    G --> T["Trace Events"]
-    T --> X["JSONL Trace Export"]
-    X --> K["SkillLoop Governance"]
+flowchart TB
+    subgraph Channels["User channels"]
+        User["User"]
+        CLI["CLI / API"]
+        Msg["Telegram / other adapters"]
+    end
+
+    subgraph Runtime["Online request path"]
+        Adapter["Adapter normalization"]
+        Identity{"Actor + visibility<br/>resolution"}
+        Graph["LangGraph runtime<br/>graph.invoke"]
+        Retrieval["Hybrid retrieval<br/>FTS + vector + graph"]
+        Model["LLM call"]
+        Salience{"Salience gate"}
+        Trace["Trace events"]
+    end
+
+    subgraph Memory["Canonical memory store"]
+        Typed["Postgres agent_memory<br/>memory.typed_memory"]
+        Edges["memory.memory_edges"]
+        Audit["memory.audit_log"]
+        Events["event_store.events"]
+        TraceTable["memory.trace_events"]
+    end
+
+    subgraph Offline["Offline governance + backfill"]
+        Vault["Obsidian vault"]
+        HermesDB["Hermes session SQLite"]
+        Bridge["Vault/session bridge<br/>bridge_vault_and_sessions.py"]
+        SkillLoop["SkillLoop governance<br/>ingest + eval + distill"]
+        Connector["Approved-memory connector<br/>connect_skillloop.py"]
+        Notifier["Review notifier<br/>notify_review.py"]
+    end
+
+    User --> CLI --> Adapter
+    User --> Msg --> Adapter
+    Adapter --> Identity --> Graph
+    Graph --> Retrieval
+    Retrieval --> Typed
+    Retrieval --> Edges
+    Typed --> Retrieval
+    Edges --> Retrieval
+    Retrieval --> Graph
+    Graph --> Model --> Graph
+    Graph --> Salience
+    Salience -->|important memory| Typed
+    Graph --> Trace --> TraceTable
+    Graph --> Adapter --> User
+
+    Vault --> Bridge
+    HermesDB --> Bridge
+    Bridge --> Typed
+    Bridge --> Audit
+    TraceTable --> SkillLoop
+    SkillLoop --> Connector
+    Connector --> Typed
+    Connector --> Audit
+    SkillLoop --> Notifier
+    Typed --> Notifier
+    Notifier --> User
+    Events -->|drain_events.py| Typed
 ```
 
 The important boundary is that runtime memory stays inside this repository's
@@ -48,37 +94,58 @@ memory directly.
 ## Full-System Pipeline
 
 ```mermaid
-flowchart TB
-    subgraph Sources
-        V["Obsidian Vault<br/>&lt;VAULT_PATH&gt;/Knowledge base/"]
-        H["Hermes Runtime Chat<br/>&lt;HOME&gt;/.hermes/state.db"]
-        S["SkillLoop Proposals<br/>&lt;HOME&gt;/skillloop/.skillloop/approved/"]
+flowchart LR
+    subgraph Scheduler["launchd / cron orchestration"]
+        L0[":00 SkillLoop controller<br/>ingest traces, evaluate, propose"]
+        L5[":05 SkillLoop connector<br/>apply approved memory proposals"]
+        L10[":10 Telegram notifier<br/>summarize pending review"]
     end
 
-    subgraph Pipeline["Hourly launchd / cron"]
-        C1["SkillLoop Controller<br/>scripts/connect_skillloop.py"]
-        C2["Vault Bridge<br/>scripts/bridge_vault_and_sessions.py"]
-        C3["Notifier<br/>scripts/notify_review.py"]
+    subgraph SkillLoopState["SkillLoop project state"]
+        SLDB[".skillloop/skillloop.db<br/>traces + evals + proposals"]
+        Approved[".skillloop/approved/memory<br/>human-approved markdown"]
+        Review["review queue<br/>pending proposals"]
     end
 
-    subgraph Storage["Postgres — agent_memory"]
-        T1["memory.typed_memory<br/>3-layer model"]
-        T2["event_store.events"]
-        T3["memory.audit_log"]
-        T4["memory.trace_events"]
+    subgraph Backfill["Backfill / maintenance jobs"]
+        Vault["Obsidian vault"]
+        Hermes["Hermes state.db"]
+        Bridge["bridge_vault_and_sessions.py<br/>vault-first import"]
+        Drain["drain_events.py<br/>event-store drain"]
     end
 
-    V -->|vault facts| C2
-    H -->|session evidence| C2
-    S -->|approved proposals| C1
-    C1 -->|insert / upsert| T1
-    C2 -->|insert / upsert| T1
-    C1 -->|audit| T3
-    C2 -->|audit| T3
-    C3 -->|reads| T1
-    C3 -->|reads| S
-    T2 -->|drain| T1
-    G -->|traces| T4
+    subgraph Postgres["Postgres agent_memory"]
+        Typed["memory.typed_memory<br/>semantic + episodic + procedural"]
+        Audit["memory.audit_log"]
+        TraceEvents["memory.trace_events"]
+        EventStore["event_store.events"]
+    end
+
+    subgraph Outputs["Operator outputs"]
+        Telegram["Telegram digest"]
+        Logs["launchd logs"]
+    end
+
+    TraceEvents -->|exported traces| L0
+    L0 --> SLDB
+    SLDB --> Review
+    Review -->|human approval| Approved
+    Approved --> L5
+    SLDB -->|proposal metadata| L5
+    L5 -->|idempotent writes| Typed
+    L5 --> Audit
+    L10 -->|reads pending count| SLDB
+    L10 -->|reads import counts| Typed
+    L10 --> Telegram
+
+    Vault --> Bridge
+    Hermes --> Bridge
+    Bridge -->|redacted canonical rows| Typed
+    Bridge --> Audit
+    EventStore --> Drain --> Typed
+    L0 --> Logs
+    L5 --> Logs
+    L10 --> Logs
 ```
 
 The three hourly jobs (controller, bridge, notifier) are designed to run via
@@ -89,28 +156,37 @@ read their configuration from environment variables.
 
 ```mermaid
 sequenceDiagram
-    participant User
-    participant Adapter
-    participant Graph as graph.invoke
-    participant Retrieval
-    participant Model
-    participant Memory
-    participant Export as trace_export
-    participant SkillLoop
+    autonumber
+    actor User
+    participant Adapter as Adapter / channel
+    participant Identity as Identity resolver
+    participant Graph as LangGraph runtime
+    participant Retrieval as Hybrid retrieval
+    participant Store as Postgres memory
+    participant Model as LLM
+    participant Trace as Trace recorder
+    participant SkillLoop as SkillLoop sidecar
 
     User->>Adapter: send message
-    Adapter->>Graph: normalized input + actor identity
-    Graph->>Retrieval: retrieve scoped context
-    Retrieval->>Memory: FTS / vector / graph lookups
-    Memory-->>Retrieval: ranked results
-    Retrieval-->>Graph: context bundle
-    Graph->>Model: prompt with context
+    Adapter->>Identity: normalize channel + actor
+    Identity-->>Adapter: actor_id, org_id, visibility scope
+    Adapter->>Graph: invoke(input, scoped identity)
+    Graph->>Retrieval: request context for current actor/session
+    Retrieval->>Store: FTS + vector + graph expansion
+    Store-->>Retrieval: permission-filtered ranked context
+    Retrieval-->>Graph: compact context bundle
+    Graph->>Model: prompt with retrieved context
     Model-->>Graph: answer
-    Graph->>Memory: optional salient write
-    Graph->>Export: trace payload
-    Export-->>SkillLoop: JSONL ingest artifact
     Graph-->>Adapter: final response
     Adapter-->>User: reply
+
+    par durable side effects
+        Graph->>Store: salient memory write if gate passes
+        Graph->>Trace: trace events + diagnostics
+        Trace-->>SkillLoop: exported traces for offline governance
+    end
+
+    Note over SkillLoop,Store: SkillLoop proposes changes offline; only approved markdown is imported by the connector.
 ```
 
 ## Repository Layout
