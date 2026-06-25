@@ -153,6 +153,7 @@ def cmd_run(args) -> int:
     run_id = controller.start_run(
         model=model,
         instructions=args.focus or "",
+        user_id=user_id,
         database_url=args.database_url,
     )
     t0 = time.time()
@@ -165,7 +166,7 @@ def cmd_run(args) -> int:
             instructions=args.focus,
             model=model,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — intentional: route any failure to fail_run
         controller.fail_run(run_id, str(exc), database_url=args.database_url)
         print(f"\nERROR: Synthesis failed: {exc}")
         traceback.print_exc()
@@ -190,7 +191,7 @@ def cmd_run(args) -> int:
             summary=result.summary,
             database_url=args.database_url,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — intentional: route any failure to fail_run
         controller.fail_run(run_id, str(exc), database_url=args.database_url)
         print(f"\nERROR: Staging failed: {exc}")
         traceback.print_exc()

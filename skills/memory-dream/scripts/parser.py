@@ -135,7 +135,7 @@ def parse_typed_memory(
     # `%s` placeholders (see `params`). If anyone appends a runtime
     # value to `where` in the future, this becomes a SQL-injection
     # vector — keep that in mind when editing.
-    sql = f"""  # noqa: S608
+    sql = f"""
         select
             id, memory_type, category, content, summary,
             confidence, source, visibility, user_id, session_id,
@@ -143,7 +143,7 @@ def parse_typed_memory(
         from memory.typed_memory
         where {" and ".join(where)}
         {_DEFAULT_ORDER_SQL}
-    """
+    """  # noqa: S608
 
     entries: list[MemoryEntry] = []
     total_chars = 0

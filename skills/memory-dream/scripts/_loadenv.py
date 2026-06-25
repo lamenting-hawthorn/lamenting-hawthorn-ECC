@@ -56,7 +56,13 @@ def load_api_key(env_path: Path | None = None) -> str:
     for var in ("LLM_API_KEY", "OPENAI_API_KEY", "NVIDIA_API_KEY", "ANTHROPIC_API_KEY"):
         existing = os.environ.get(var, "").strip()
         if existing:
-            return _strip_bearer(_strip_quotes(existing))
+            value = _strip_bearer(_strip_quotes(existing))
+            # Always export the normalized key under LLM_API_KEY so
+            # downstream callers (dream.py, synthesizer.py) can rely
+            # on a single env var regardless of which one was set.
+            if var != "LLM_API_KEY":
+                os.environ["LLM_API_KEY"] = value
+            return value
 
     candidates: list[Path] = []
     if env_path is not None:
@@ -86,7 +92,14 @@ def load_api_key(env_path: Path | None = None) -> str:
             )
             continue
         if value:
-            os.environ.setdefault("LLM_API_KEY", value)
+            # Use direct assignment (not setdefault) so an empty
+            # existing LLM_API_KEY does not block a valid .env value
+            # from being loaded. Also export the .env value under all
+            # recognized env-var names so downstream code can use
+            # whichever it prefers.
+            os.environ["LLM_API_KEY"] = value
+            for var in ("OPENAI_API_KEY", "NVIDIA_API_KEY", "ANTHROPIC_API_KEY"):
+                os.environ[var] = value
             return value
 
     raise KeyError(
@@ -118,5 +131,6 @@ if __name__ == "__main__":
     except KeyError as exc:
         _LOGGER.error("%s", exc)
         raise SystemExit(1) from exc
-    # Never log fragments of the key — only the fact that it loaded.
-    _LOGGER.info("Loaded LLM API key (len=%d)", len(key))
+    # Never log fragments of the key or any secret-derived metadata
+    # (length, prefix, suffix). A generic confirmation is enough.
+    _LOGGER.info("Loaded LLM API key")

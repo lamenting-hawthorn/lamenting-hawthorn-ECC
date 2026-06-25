@@ -125,6 +125,25 @@ def collect_activity(
     shorter than ``min_session_chars`` are also skipped (too small
     to be worth the curator's attention).
     """
+    # Fail-fast parameter validation. Bad bounds would produce
+    # nonsense queries (negative LIMIT, zero-char budget) or just
+    # confusing empty results.
+    if not isinstance(user_id, str) or not user_id:
+        raise ValueError("user_id is required")
+    if not isinstance(max_age_days, int) or max_age_days <= 0:
+        raise ValueError(f"max_age_days must be a positive int, got {max_age_days!r}")
+    if not isinstance(max_sessions, int) or max_sessions <= 0:
+        raise ValueError(f"max_sessions must be a positive int, got {max_sessions!r}")
+    if not isinstance(min_session_chars, int) or min_session_chars <= 0:
+        raise ValueError(f"min_session_chars must be a positive int, got {min_session_chars!r}")
+    if not isinstance(max_total_chars, int) or max_total_chars <= 0:
+        raise ValueError(f"max_total_chars must be a positive int, got {max_total_chars!r}")
+    if min_session_chars > max_total_chars:
+        raise ValueError(
+            f"min_session_chars ({min_session_chars}) cannot exceed "
+            f"max_total_chars ({max_total_chars})"
+        )
+
     cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)  # noqa: UP017
 
     with _connect(database_url) as conn:
@@ -202,7 +221,7 @@ def collect_activity(
                 created_at
             from memory.trace_events
             where user_id = %s
-              and (session_id = ANY(%s) or session_id is null)
+              and session_id = ANY(%s)
               and created_at >= %s
               and status in ('error', 'fallback')
             order by created_at asc
@@ -237,11 +256,12 @@ def collect_activity(
             digest.retrieval_queries.append(q)
 
     for r in trace_rows:
-        # If trace row has no session_id, attribute to the most recent
-        # active session (best effort).
+        # Only attach trace rows whose session_id matches one of the
+        # sessions we're already showing. Unscoped (null or unknown)
+        # rows are dropped — they would otherwise be misattributed to
+        # the newest session and mix unrelated context into the
+        # curator prompt.
         sid = r.get("session_id")
-        if sid is None:
-            sid = session_ids[0] if session_ids else None
         digest = by_session.get(sid) if sid else None
         if digest is None:
             continue
