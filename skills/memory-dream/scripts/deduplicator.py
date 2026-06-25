@@ -25,14 +25,11 @@ to merge rows owned by different actors.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
-from typing import List, Sequence, Set
+from dataclasses import dataclass
 
 import psycopg
-from psycopg.rows import dict_row
-
 from parser import MemoryEntry, ParsedStore
-
+from psycopg.rows import dict_row
 
 DEFAULT_DATABASE_URL = "postgresql:///agent_memory"
 
@@ -53,7 +50,7 @@ class DuplicateGroup:
     """A cluster of typed_memory rows that look like duplicates."""
 
     canonical: MemoryEntry
-    members: List[MemoryEntry]
+    members: list[MemoryEntry]
     reason: str  # "exact" | "substring" | "prefix" | "semantic"
     similarity: float = 1.0  # for "semantic", the cosine score; 1.0 otherwise
 
@@ -64,7 +61,7 @@ class DuplicateGroup:
         )
 
 
-def find_exact_dupes(entries: List[MemoryEntry]) -> List[DuplicateGroup]:
+def find_exact_dupes(entries: list[MemoryEntry]) -> list[DuplicateGroup]:
     """Group entries whose text is identical after case+whitespace normalization."""
     groups: dict[str, list[MemoryEntry]] = {}
     for e in entries:
@@ -82,9 +79,9 @@ def find_exact_dupes(entries: List[MemoryEntry]) -> List[DuplicateGroup]:
 
 
 def find_substring_dupes(
-    entries: List[MemoryEntry],
+    entries: list[MemoryEntry],
     min_overlap_chars: int = 80,
-) -> List[DuplicateGroup]:
+) -> list[DuplicateGroup]:
     """
     Group entries where one row's text is fully contained in another's.
 
@@ -93,7 +90,7 @@ def find_substring_dupes(
     unrelated rows that share a common phrase.
     """
     result: list[DuplicateGroup] = []
-    consumed: Set[int] = set()
+    consumed: set[int] = set()
 
     sorted_entries = sorted(entries, key=lambda e: -len(e.text))
 
@@ -124,9 +121,9 @@ def find_substring_dupes(
 
 
 def find_common_prefix_dupes(
-    entries: List[MemoryEntry],
+    entries: list[MemoryEntry],
     min_prefix_chars: int = 60,
-) -> List[DuplicateGroup]:
+) -> list[DuplicateGroup]:
     """
     Find entries sharing a long common prefix. These are often the
     same fact edited over time ("...uses Postgres" → "...uses Postgres
@@ -134,7 +131,7 @@ def find_common_prefix_dupes(
     to consider merging.
     """
     result: list[DuplicateGroup] = []
-    consumed: Set[int] = set()
+    consumed: set[int] = set()
     sorted_entries = sorted(entries, key=lambda e: -len(e.text))
 
     for i, a in enumerate(sorted_entries):
@@ -170,7 +167,7 @@ def find_semantic_dupes(
     threshold: float = DEFAULT_SEMANTIC_THRESHOLD,
     candidates: int = DEFAULT_VECTOR_CANDIDATES,
     database_url: str | None = None,
-) -> List[DuplicateGroup]:
+) -> list[DuplicateGroup]:
     """
     Find typed_memory rows whose pgvector cosine similarity is at or
     above ``threshold`` AND whose memory_type + category match. Pairs
@@ -198,14 +195,21 @@ def find_semantic_dupes(
         for entry in store.entries:
             if entry.superseded_by:
                 continue
-            # Fetch the nearest neighbours within the same bucket.
+            # Fetch the entry's own embedding once, then bind it as a
+            # parameter so the cosine query only needs one round-trip
+            # and one embedding lookup per entry (was 3x).
+            emb_row = conn.execute(
+                "select embedding from memory.typed_memory where id = %s",
+                (entry.row_id,),
+            ).fetchone()
+            if not emb_row or emb_row["embedding"] is None:
+                continue
+            emb = emb_row["embedding"]
             rows = conn.execute(
                 """
                 select
                     id,
-                    1 - (embedding <=> (
-                        select embedding from memory.typed_memory where id = %s
-                    )) as similarity
+                    1 - (embedding <=> %s) as similarity
                 from memory.typed_memory
                 where user_id = %s
                   and memory_type = %s
@@ -213,18 +217,16 @@ def find_semantic_dupes(
                   and id != %s
                   and superseded_by is null
                   and embedding is not null
-                order by embedding <=> (
-                    select embedding from memory.typed_memory where id = %s
-                )
+                order by embedding <=> %s
                 limit %s
                 """,
                 (
-                    entry.row_id,
+                    emb,
                     entry.user_id,
                     entry.memory_type,
                     entry.category,
                     entry.row_id,
-                    entry.row_id,
+                    emb,
                     candidates,
                 ),
             ).fetchall()
@@ -268,14 +270,14 @@ def find_all_dupes(
     include_semantic: bool = True,
     semantic_threshold: float = DEFAULT_SEMANTIC_THRESHOLD,
     database_url: str | None = None,
-) -> List[DuplicateGroup]:
+) -> list[DuplicateGroup]:
     """
     Run all dedup passes in order: exact → substring → prefix → semantic.
     Returns non-overlapping groups (entries that are already in a
     group are skipped by later passes).
     """
     groups: list[DuplicateGroup] = []
-    consumed_ids: Set[str] = set()
+    consumed_ids: set[str] = set()
 
     def _consume(g: DuplicateGroup) -> bool:
         if any(m.row_id in consumed_ids for m in g.members):
@@ -305,6 +307,7 @@ def find_all_dupes(
 
 if __name__ == "__main__":
     import sys
+
     from parser import parse_typed_memory
 
     target = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("ACTOR_ID", "u_owner")

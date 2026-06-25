@@ -23,11 +23,9 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import List
 
 import psycopg
 from psycopg.rows import dict_row
-
 
 DEFAULT_DATABASE_URL = "postgresql:///agent_memory"
 
@@ -40,10 +38,10 @@ _MAX_PAYLOAD_CHARS = 600
 class ActivityDigest:
     session_id: str
     char_count: int = 0
-    user_messages: List[str] = field(default_factory=list)
-    assistant_messages: List[str] = field(default_factory=list)
-    retrieval_queries: List[str] = field(default_factory=list)
-    trace_steps: List[str] = field(default_factory=list)
+    user_messages: list[str] = field(default_factory=list)
+    assistant_messages: list[str] = field(default_factory=list)
+    retrieval_queries: list[str] = field(default_factory=list)
+    trace_steps: list[str] = field(default_factory=list)
     text: str = ""
 
     def __post_init__(self) -> None:
@@ -111,7 +109,7 @@ def collect_activity(
     min_session_chars: int = 200,
     max_total_chars: int = 50000,
     database_url: str | None = None,
-) -> List[ActivityDigest]:
+) -> list[ActivityDigest]:
     """
     Pull the most recent ``max_sessions`` sessions worth of activity
     from event_store, retrieval_logs, and trace_events, then collapse
@@ -127,7 +125,7 @@ def collect_activity(
     shorter than ``min_session_chars`` are also skipped (too small
     to be worth the curator's attention).
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)  # noqa: UP017
 
     with _connect(database_url) as conn:
         # 1. Get the most recent N sessions that have at least one
@@ -256,7 +254,7 @@ def collect_activity(
 
     # 6. Drop empty digests, sort by recency, then budget-trim.
     digests = [d for d in by_session.values() if d.user_messages or d.assistant_messages]
-    digests.sort(key=lambda d: session_last_at.get(d.session_id, datetime.min.replace(tzinfo=timezone.utc)), reverse=True)
+    digests.sort(key=lambda d: session_last_at.get(d.session_id, datetime.min.replace(tzinfo=timezone.utc)), reverse=True)  # noqa: UP017
 
     result: list[ActivityDigest] = []
     total = 0
