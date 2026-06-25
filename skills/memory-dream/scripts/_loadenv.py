@@ -94,12 +94,17 @@ def load_api_key(env_path: Path | None = None) -> str:
         if value:
             # Use direct assignment (not setdefault) so an empty
             # existing LLM_API_KEY does not block a valid .env value
-            # from being loaded. Also export the .env value under all
-            # recognized env-var names so downstream code can use
-            # whichever it prefers.
+            # from being loaded. Only set the env var matching the
+            # detected provider prefix (plus LLM_API_KEY) so an
+            # OpenAI key does not overwrite a legitimate NVIDIA or
+            # Anthropic key already set in the environment.
             os.environ["LLM_API_KEY"] = value
-            for var in ("OPENAI_API_KEY", "NVIDIA_API_KEY", "ANTHROPIC_API_KEY"):
-                os.environ[var] = value
+            if value.startswith(_OPENAI_PREFIX):
+                os.environ["OPENAI_API_KEY"] = value
+            elif value.startswith(_NVIDIA_PREFIX):
+                os.environ["NVIDIA_API_KEY"] = value
+            else:
+                os.environ["ANTHROPIC_API_KEY"] = value
             return value
 
     raise KeyError(

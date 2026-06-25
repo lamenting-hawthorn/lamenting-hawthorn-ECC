@@ -82,8 +82,13 @@ def cmd_run(args) -> int:
     user_id = args.user_id or DEFAULT_ACTOR_ID
     model = args.model or DEFAULT_MODEL
 
-    # Pre-flight: are there already pending proposals from a previous run?
-    pending = controller.pending_proposals_count(database_url=args.database_url)
+    # Pre-flight: are there already pending proposals from a previous
+    # run for THIS user? ``pending_proposals_count`` accepts a
+    # user_id kwarg; without it, another actor's pending proposals
+    # would block this run.
+    pending = controller.pending_proposals_count(
+        user_id=user_id, database_url=args.database_url,
+    )
     if pending > 0:
         print(
             f"WARNING:  {pending} proposal(s) from a previous run are still pending review."

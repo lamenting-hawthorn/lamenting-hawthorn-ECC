@@ -149,6 +149,20 @@ def _format_entries(entries: list[MemoryEntry]) -> str:
     )
 
 
+def _escape_braces(text: str) -> str:
+    """Escape ``{`` and ``}`` so the text survives ``str.format()``.
+
+    Memory text, session excerpts, and user-supplied instructions may
+    legitimately contain curly braces (e.g. JSON snippets, code).
+    ``PROMPT_TEMPLATE.format()`` treats them as named placeholders and
+    raises ``KeyError`` / ``IndexError`` on any unmatched brace. The
+    memory excerpts path uses a separate ``_sanitize_excerpt`` to
+    handle the full escaping; this helper does the minimum for the
+    template-bound text and the user-instructions block.
+    """
+    return text.replace("{", "{{").replace("}", "}}")
+
+
 def build_prompt(
     store: ParsedStore,
     session_excerpts: str,
@@ -161,22 +175,27 @@ def build_prompt(
     if instructions and instructions.strip():
         user_instr = (
             "\n## User's specific guidance for this curation pass\n\n"
-            f"{instructions.strip()}\n"
+            f"{_escape_braces(instructions.strip())}\n"
         )
 
     by_type: dict[str, list[MemoryEntry]] = {"semantic": [], "procedural": [], "episodic": []}
     for e in store.entries:
         by_type.setdefault(e.memory_type, []).append(e)
 
+    # Memory text and session excerpts may contain ``{`` / ``}`` (JSON
+    # snippets, code, etc.) which ``str.format()`` would treat as
+    # placeholders. Escape them before substitution. ``session_excerpts``
+    # is already escaped upstream by ``_sanitize_excerpt``, but we
+    # double-escape defensively in case the caller passes raw text.
     return PROMPT_TEMPLATE.format(
         mem_count=store.entry_count,
         mem_chars=store.char_count,
-        semantic_entries=_format_entries(by_type.get("semantic", [])),
-        procedural_entries=_format_entries(by_type.get("procedural", [])),
-        episodic_entries=_format_entries(by_type.get("episodic", [])),
+        semantic_entries=_escape_braces(_format_entries(by_type.get("semantic", []))),
+        procedural_entries=_escape_braces(_format_entries(by_type.get("procedural", []))),
+        episodic_entries=_escape_braces(_format_entries(by_type.get("episodic", []))),
         sess_count=sess_count,
         sess_chars=sess_chars,
-        session_excerpts=session_excerpts or "(no sessions)",
+        session_excerpts=_escape_braces(session_excerpts or "(no sessions)"),
         user_instructions=user_instr,
     )
 
