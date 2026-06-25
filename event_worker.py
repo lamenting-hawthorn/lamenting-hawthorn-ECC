@@ -81,6 +81,49 @@ TRIVIAL_PATTERNS = {"lol", "ok", "thanks", "👍", "k", "yes", "no",
 NOISE_EVENT_TYPES = {"system_heartbeat", "connection_ping", "health_check"}
 
 
+def _payload_dict(event: Dict) -> Dict:
+    """Return ``event['payload']`` coerced to a dict.
+
+    ``jsonb`` payloads from Postgres can be a JSON string, a list, ``None``,
+    or already a dict depending on the writer. ``str`` payloads are parsed
+    once and the result is returned only when it is itself a mapping;
+    anything else becomes ``{}`` so downstream ``.get(...)`` calls stay safe.
+    """
+    payload = event.get("payload") or {}
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except (TypeError, json.JSONDecodeError, ValueError):
+            return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _summarize_tool_calls(tool_calls: Any) -> str:
+    """Build a short textual summary of a ``tool_calls`` payload.
+
+    Used as a fallback for events that pass the salience gate and classifier
+    on tool-call content but have no ``text`` field — for example a raw
+    function-call record. We deliberately keep this short and structured so
+    downstream embedding and search still work.
+    """
+    if not tool_calls:
+        return ""
+    if isinstance(tool_calls, dict):
+        tool_calls = [tool_calls]
+    if not isinstance(tool_calls, list):
+        return ""
+    parts: List[str] = []
+    for call in tool_calls:
+        if not isinstance(call, dict):
+            continue
+        name = call.get("name") or call.get("function", {}).get("name") or "tool"
+        args = call.get("arguments") or call.get("function", {}).get("arguments") or ""
+        if isinstance(args, (dict, list)):
+            args = json.dumps(args, ensure_ascii=False)
+        parts.append(f"{name}({args})" if args else str(name))
+    return "; ".join(p for p in parts if p)
+
+
 def salience_gate(event: Dict) -> Tuple[bool, Optional[str]]:
     """
     Returns (passes_gate: bool, reason_for_rejection: Optional[str]).
@@ -97,13 +140,7 @@ def salience_gate(event: Dict) -> Tuple[bool, Optional[str]]:
         return False, "system_noise"
 
     # Rule 2: minimum content
-    payload = event.get("payload", {}) or {}
-    if isinstance(payload, str):
-        try:
-            import json
-            payload = json.loads(payload)
-        except Exception:
-            payload = {}
+    payload = _payload_dict(event)
     text = (payload.get("text") or "").strip()
     has_tool_calls = bool(payload.get("tool_calls"))
 
@@ -141,13 +178,7 @@ def classify_event(event: Dict) -> Tuple[str, str, float]:
     Uses rule-based heuristic first, then falls back to LLM classification
     for ambiguous cases.
     """
-    payload = event.get("payload", {}) or {}
-    if isinstance(payload, str):
-        try:
-            import json
-            payload = json.loads(payload)
-        except Exception:
-            payload = {}
+    payload = _payload_dict(event)
     text = (payload.get("text") or "").lower().strip()
     event_type = event.get("event_type", "")
 
@@ -344,7 +375,12 @@ class EventWorker:
 
     async def fetch_unprocessed(self) -> List[Dict]:
         """Atomically claim the next batch of unprocessed events."""
-        # Cooldown: reset stale poison-pilled events so they can retry
+        # Cooldown: only reset rows whose lease has already expired.
+        # A row that is currently being processed (processing_started_at IS NULL
+        # because another worker just claimed it and updated the column) must not
+        # be reset, otherwise concurrent workers can collide and double-process.
+        # Likewise, deterministic failures (processing_attempts >= 5 with no
+        # recent lease activity) are left alone so they don't retry forever.
         await self._db.execute(
             """
             UPDATE event_store.events
@@ -353,6 +389,8 @@ class EventWorker:
                 processing_error = NULL
             WHERE processed_at IS NULL
               AND processing_attempts >= 5
+              AND processing_started_at IS NOT NULL
+              AND processing_started_at < now() - interval '15 minutes'
             """
         )
         rows = await self._db.fetch(
@@ -442,19 +480,19 @@ class EventWorker:
 
         # 3. Classify
         memory_type, category, confidence = classify_event(event)
-        payload = event.get("payload", {}) or {}
-        if isinstance(payload, str):
-            try:
-                import json
-                payload = json.loads(payload)
-            except Exception:
-                payload = {}
-        content = (payload.get("text", "") or "")
+        payload = _payload_dict(event)
+        content = (payload.get("text", "") or "").strip()
 
         if not content:
-            # No text to store — mark processed but don't write memory
-            await self._mark_processed(event_id)
-            return
+            # Salience gate already allowed tool_call events through even
+            # without a text body. Derive a deterministic summary from the
+            # tool_calls payload so we don't drop valid procedural memories.
+            fallback = _summarize_tool_calls(payload.get("tool_calls"))
+            if not fallback:
+                # No text and no tool calls to summarize — nothing to store.
+                await self._mark_processed(event_id)
+                return
+            content = f"[tool_call] {fallback}"
 
         # 4. Generate embedding (semantic/procedural only)
         embedding = None

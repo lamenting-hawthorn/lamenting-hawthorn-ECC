@@ -45,11 +45,13 @@ This is a **cron-loop**, not a goal-loop:
 - 9 existing tests re-verified — all pass
 - Connector plist written
 - SkillLoop apply enhancement (was already done, verified live)
-- **BOTH PLISTS LOADED** via launchctl bootstrap (2026-06-25)
+- **ALL PLISTS LOADED** via launchctl bootstrap (2026-06-25)
   - com.skillloop.controller.1f2f136e0018 → registered, runs hourly at minute 0
-  - com.agent_architecture.connector → registered, runs hourly at minute 5
+  - com.agent_architecture.controller → registered, runs hourly at minute 5
 - **NOTIFIER PLIST LOADED** via launchctl bootstrap (2026-06-25)
   - com.agent_architecture.notify → registered, runs hourly at minute 10
+  - **BRIDGE PLIST LOADED** via launchctl bootstrap (2026-06-25)
+  - com.agent_architecture.bridge → registered, runs hourly at minute 15
   - Sends Telegram digest to user <TELEGRAM_USER_ID> with pending proposal count + recent imports
   - System is now fully self-driving AND self-notifying
   - User reviews + approves proposals via `skillloop --path <HOME>/agent_architecture review approve <id>` then `apply`

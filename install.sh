@@ -99,11 +99,12 @@ echo "Running init_schema.sql ..."
 if psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f init_schema.sql >/dev/null 2>&1; then
     echo "OK: schema applied"
 else
-    echo "WARNING: schema migration failed."
+    echo "ERROR: schema migration failed. Setup cannot continue without a healthy database."
     echo "  Make sure Postgres is running and the database exists:"
     echo "    createdb agent_memory"
     echo "  Then re-run:"
     echo "    psql \"$DATABASE_URL\" -f init_schema.sql"
+    exit 1
 fi
 
 # ---------------------------------------------------------------------------

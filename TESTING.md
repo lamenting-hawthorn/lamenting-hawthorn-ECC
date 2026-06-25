@@ -70,7 +70,9 @@ $ python -B -m pytest -p no:cacheprovider src -q
 12 passed in 4.32s
 ```
 
-If Postgres is unavailable, tests that require it are skipped:
+If Postgres is unavailable, this is a **partial run** — the Postgres-backed
+tests are skipped rather than executed, so a green run on a machine without
+Postgres is not the same as a green run on a real database:
 
 ```text
 $ python -B -m pytest -p no:cacheprovider src -q

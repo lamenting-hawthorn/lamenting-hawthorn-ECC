@@ -21,6 +21,7 @@ from psycopg.rows import dict_row
 
 
 def _typed_memory_count() -> int:
+    """Return the current row count of ``memory.typed_memory``."""
     url = os.environ.get("DATABASE_URL", "postgresql:///agent_memory")
     with psycopg.connect(url, row_factory=dict_row) as conn:
         row = conn.execute("SELECT COUNT(*) AS cnt FROM memory.typed_memory").fetchone()
@@ -28,6 +29,7 @@ def _typed_memory_count() -> int:
 
 
 def _unprocessed_events_count() -> int:
+    """Return the number of unprocessed rows in ``event_store.events``."""
     url = os.environ.get("DATABASE_URL", "postgresql:///agent_memory")
     with psycopg.connect(url, row_factory=dict_row) as conn:
         row = conn.execute(
@@ -37,6 +39,12 @@ def _unprocessed_events_count() -> int:
 
 
 async def main() -> int:
+    """Run :class:`EventWorker` until the event queue is empty.
+
+    Prints before/after row counts for ``typed_memory`` and
+    ``event_store.events`` so cron jobs can verify the drain actually
+    progressed. Returns ``0`` on success, ``1`` on import or runtime error.
+    """
     before = _typed_memory_count()
     events_before = _unprocessed_events_count()
     print(f"[drain] typed_memory rows before: {before}")

@@ -10,6 +10,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -27,8 +28,8 @@ from redaction import pseudonymize_payload
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-DEFAULT_VAULT_PATH = os.path.expanduser("<VAULT_PATH>/Knowledge base/")
-DEFAULT_SQLITE_PATH = os.path.expanduser("<HOME>/.hermes/state.db")
+DEFAULT_VAULT_PATH = os.path.expanduser("~/Knowledge base")
+DEFAULT_SQLITE_PATH = os.path.expanduser("~/.hermes/state.db")
 DEFAULT_DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql:///agent_memory")
 
 # User-confirmed identity defaults
@@ -117,14 +118,19 @@ def _parse_frontmatter(text: str) -> Tuple[Dict[str, Any], str, str]:
     return fm, body, raw
 
 def _is_excluded_anchor(rel_path: str, frontmatter: Dict[str, Any], raw_content: str) -> bool:
-    """Exclude MOCs, indexes, READMEs, and files with empty content."""
+    """Exclude MOCs, indexes, and empty files. READMEs are kept when they
+    live under a memory/ subtree — the bridge design treats
+    ``memory/procedural/README.md`` and similar as valid anchors."""
     name = Path(rel_path).name.lower()
+    rel_lower = rel_path.lower()
     # Exclude by name patterns
     if "moc" in name or "moc" in frontmatter.get("type", "").lower():
         return True
     if name == "index.md":
         return True
-    if name == "readme.md":
+    # Only exclude top-level / non-memory README files. A README inside a
+    # memory/ subtree is a legitimate anchor.
+    if name == "readme.md" and "memory/" not in rel_lower:
         return True
     # Exclude empty or near-empty files
     body = raw_content
@@ -139,6 +145,50 @@ def _is_excluded_anchor(rel_path: str, frontmatter: Dict[str, Any], raw_content:
     if not fm_type and len(body) < 400:
         return True
     return False
+
+# Frontmatter / filename date keys the bridge design (§5.5) treats as
+# authoritative for the SQLite search window. We try them in priority order
+# before falling back to the filesystem mtime.
+_FRONTMATTER_DATE_KEYS = ("lastUpdated", "last_updated", "updated", "created", "date")
+_DATE_FILENAME_RE = re.compile(r"(20\d{2})[-_](\d{2})[-_](\d{2})")
+
+
+def _vault_date_center(path: Path, frontmatter: Dict[str, Any], rel_path: str) -> Optional[datetime]:
+    """Best-effort ``date_center`` for a vault anchor.
+
+    Resolution order (per bridge design §5.5):
+
+    1. ``lastUpdated`` / ``updated`` / ``created`` in frontmatter.
+    2. ISO date embedded in the filename (``2026-05-23.md`` or
+       ``2026_05_23.md``) — the format used by daily journals.
+    3. ``None`` — caller is expected to fall back to ``st_mtime``.
+    """
+    # 1. frontmatter
+    for key in _FRONTMATTER_DATE_KEYS:
+        raw = frontmatter.get(key)
+        if not raw:
+            continue
+        if isinstance(raw, datetime):
+            return raw if raw.tzinfo else raw.replace(tzinfo=timezone.utc)
+        if isinstance(raw, str):
+            text = raw.strip().strip("'\"")
+            # Try ISO 8601 with optional trailing Z
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            try:
+                dt = datetime.fromisoformat(text)
+            except ValueError:
+                continue
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    # 2. filename (daily journal)
+    match = _DATE_FILENAME_RE.search(path.name)
+    if match:
+        try:
+            return datetime(int(match.group(1)), int(match.group(2)), int(match.group(3)), tzinfo=timezone.utc)
+        except ValueError:
+            pass
+    return None
+
 
 def _extract_keywords(anchor: VaultAnchor) -> List[str]:
     keywords: set[str] = set()
@@ -305,9 +355,15 @@ class VaultScanner:
                 date_window_days=7,
             )
             anchor.keyword_set = _extract_keywords(anchor)
-            # Date window
-            mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
-            anchor.date_center = mtime
+            # Date window — prefer the frontmatter/filename date, fall back to
+            # file mtime only when nothing else is available. The mtime is the
+            # least reliable signal (it shifts for synced or backfilled files)
+            # and the bridge design §5.5 explicitly recommends the other
+            # sources in priority order.
+            date_center = _vault_date_center(path, anchor.frontmatter, rel)
+            if date_center is None:
+                date_center = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+            anchor.date_center = date_center
             if "memory/core.md" in rel.lower():
                 anchor.date_window_days = 14
             elif "memory/" in rel.lower():
@@ -330,20 +386,56 @@ class SqliteScanner:
     def find_matches(self, anchor: VaultAnchor, incremental_last_id: int = 0) -> List[MatchedChunk]:
         if anchor.anchor_strength < 0.5:
             return []
-        if not anchor.keyword_set:
-            return []
-        # Use top keywords by length (most specific first)
-        keywords = sorted([k for k in anchor.keyword_set if len(k) > 2], key=len, reverse=True)[:8]
-        if not keywords:
+        # Use top keywords by length (most specific first). An anchor with no
+        # usable keywords (e.g. a daily journal with a date in its filename
+        # and an empty body) is still valid — fall back to a date-window scan
+        # over the SQLite messages so the journal can still pull in evidence
+        # from the surrounding day(s).
+        keywords: List[str] = []
+        if anchor.keyword_set:
+            keywords = sorted([k for k in anchor.keyword_set if len(k) > 2], key=len, reverse=True)[:8]
+
+        if not keywords and not anchor.date_center:
             return []
 
-        # Try FTS5 on messages_fts (content column only)
+        # Try FTS5 on messages_fts (content column only) when we have keywords.
         rowids: set[int] = set()
-        for kw in keywords[:3]:
+        if keywords:
+            for kw in keywords[:3]:
+                try:
+                    cursor = self.conn.execute(
+                        "SELECT rowid FROM messages_fts WHERE content MATCH ? LIMIT 200",
+                        (kw,),
+                    )
+                    for r in cursor.fetchall():
+                        rowids.add(r[0])
+                except Exception:
+                    pass
+
+        if not rowids:
+            # Fallback LIKE (only useful when we have keywords).
+            if keywords:
+                likes = [f"%{kw}%" for kw in keywords]
+                clauses = " OR ".join(["content LIKE ?"] * len(likes))
+                cursor = self.conn.execute(
+                    f"SELECT id FROM messages WHERE ({clauses}) AND id > ? AND role != 'session_meta' LIMIT 200",
+                    likes + [incremental_last_id],
+                )
+                for r in cursor.fetchall():
+                    rowids.add(r[0])
+
+        # Date-window fallback: if keyword search produced nothing (or we
+        # never had keywords to begin with), scan messages by timestamp using
+        # the anchor's date_center and date_window_days.
+        if not rowids and anchor.date_center is not None:
+            center = anchor.date_center
+            half_window = anchor.date_window_days * 24 * 3600
+            lo = int(center.timestamp()) - half_window
+            hi = int(center.timestamp()) + half_window
             try:
                 cursor = self.conn.execute(
-                    "SELECT rowid FROM messages_fts WHERE content MATCH ? LIMIT 200",
-                    (kw,),
+                    "SELECT id FROM messages WHERE timestamp BETWEEN ? AND ? AND id > ? AND role != 'session_meta' LIMIT 200",
+                    (lo, hi, incremental_last_id),
                 )
                 for r in cursor.fetchall():
                     rowids.add(r[0])
@@ -351,23 +443,16 @@ class SqliteScanner:
                 pass
 
         if not rowids:
-            # Fallback LIKE
-            likes = [f"%{kw}%" for kw in keywords]
-            clauses = " OR ".join(["content LIKE ?"] * len(likes))
-            cursor = self.conn.execute(
-                f"SELECT id FROM messages WHERE ({clauses}) AND id > ? AND role != 'session_meta' LIMIT 200",
-                likes + [incremental_last_id],
-            )
-            for r in cursor.fetchall():
-                rowids.add(r[0])
-
-        if not rowids:
             return []
 
         placeholders = ",".join(["?"] * len(rowids))
+        # Apply ``incremental_last_id`` to the final lookup too. The FTS path
+        # populates ``rowids`` from ``messages_fts.rowid`` regardless of the
+        # checkpoint, so without this filter scheduled incremental runs would
+        # rescan historical evidence and rely on dedup to recover.
         rows = self.conn.execute(
-            f"SELECT * FROM messages WHERE id IN ({placeholders}) AND role != 'session_meta'",
-            list(rowids),
+            f"SELECT * FROM messages WHERE id IN ({placeholders}) AND id > ? AND role != 'session_meta'",
+            list(rowids) + [incremental_last_id],
         ).fetchall()
 
         center = anchor.date_center
@@ -478,6 +563,19 @@ class PostgresWriter:
                 WHERE source IN ('user_utterance', 'agent_inference', 'tool_result')
                 """
             )
+            # Vault facts get their own partial unique index so two concurrent
+            # bridge runs cannot both insert the same anchor between the
+            # existence check and the INSERT. ``vault_idempotency_key`` is a
+            # stable hash of (rel_path, content_hash) — duplicates must be
+            # impossible at the DB layer, not just guarded in Python.
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_typed_memory_vault_idempotency
+                ON memory.typed_memory ((metadata->>'vault_idempotency_key'))
+                WHERE source IN ('hermes_import', 'vault_bridge')
+                  AND metadata ? 'vault_idempotency_key'
+                """
+            )
             conn.commit()
 
     def get_checkpoint(self, source: str) -> Optional[Dict[str, Any]]:
@@ -521,67 +619,104 @@ class PostgresWriter:
             return "dry-run-id"
 
         with self._connect() as conn:
-            existing = conn.execute(
-                "SELECT id FROM memory.typed_memory WHERE metadata->>'vault_idempotency_key' = %s",
-                (idempotency_key,),
-            ).fetchone()
-            if existing:
-                self.skipped += 1
-                return str(existing["id"])
+            try:
+                row = conn.execute(
+                    """
+                    INSERT INTO memory.typed_memory
+                        (memory_type, category, content, summary, user_id, session_id,
+                         org_id, role, visibility, confidence, source, metadata, embedding)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL)
+                    ON CONFLICT ((metadata->>'vault_idempotency_key'))
+                    WHERE source IN ('hermes_import', 'vault_bridge')
+                    DO NOTHING
+                    RETURNING id
+                    """,
+                    (
+                        anchor.suggested_memory_type,
+                        anchor.suggested_category,
+                        redacted,
+                        None,
+                        ACTOR_ID,
+                        anchor.rel_path,
+                        ORG_ID,
+                        ROLE,
+                        VISIBILITY,
+                        anchor.anchor_strength,
+                        "hermes_import",
+                        psycopg.types.json.Jsonb(metadata),
+                    ),
+                ).fetchone()
+            except Exception as e:
+                conn.rollback()
+                self.errored += 1
+                print(json.dumps({
+                    "event": "vault_error",
+                    "rel_path": anchor.rel_path,
+                    "error": str(e),
+                }))
+                return None
 
-            row = conn.execute(
-                """
-                INSERT INTO memory.typed_memory
-                    (memory_type, category, content, summary, user_id, session_id,
-                     org_id, role, visibility, confidence, source, metadata, embedding)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL)
-                RETURNING id
-                """,
-                (
-                    anchor.suggested_memory_type,
-                    anchor.suggested_category,
-                    redacted,
-                    None,
-                    ACTOR_ID,
-                    anchor.rel_path,
-                    ORG_ID,
-                    ROLE,
-                    VISIBILITY,
-                    anchor.anchor_strength,
-                    "hermes_import",
-                    psycopg.types.json.Jsonb(metadata),
-                ),
-            ).fetchone()
+            if row is None:
+                # Either the ON CONFLICT path or the original pre-check
+                # path landed on an existing row. Both should count as
+                # a skip, never a duplicate insert.
+                self.skipped += 1
+                return None
+
             tm_id = str(row["id"])
             self.inserted += 1
 
             if reverse_map:
-                conn.execute(
-                    """
-                    INSERT INTO memory.audit_log (event_type, user_id, session_id, target_id, details)
-                    VALUES ('memory_written', %s, %s, %s, %s)
-                    """,
-                    (
-                        ACTOR_ID,
-                        anchor.rel_path,
-                        tm_id,
-                        psycopg.types.json.Jsonb({
-                            "reverse_mapping": reverse_map,
-                            "source": "vault",
-                            "redacted_by": "bridge_vault_and_sessions.py",
-                        }),
-                    ),
-                )
+                try:
+                    conn.execute(
+                        """
+                        INSERT INTO memory.audit_log (event_type, user_id, session_id, target_id, details)
+                        VALUES ('memory_written', %s, %s, %s, %s)
+                        """,
+                        (
+                            ACTOR_ID,
+                            anchor.rel_path,
+                            tm_id,
+                            psycopg.types.json.Jsonb({
+                                "reverse_mapping": reverse_map,
+                                "source": "vault",
+                                "redacted_by": "bridge_vault_and_sessions.py",
+                            }),
+                        ),
+                    )
+                    conn.commit()
+                except Exception as e:
+                    # Roll the typed_memory insert back too — without the
+                    # audit log the row would be orphaned.
+                    conn.rollback()
+                    self.errored += 1
+                    print(json.dumps({
+                        "event": "vault_audit_error",
+                        "rel_path": anchor.rel_path,
+                        "memory_id": tm_id,
+                        "error": str(e),
+                    }))
+                    return None
             return tm_id
 
-    def write_sqlite_evidence(self, chunks: List[MatchedChunk], redacted: str, reverse_map: Dict[str, str]) -> Optional[str]:
+    def write_sqlite_evidence(self, chunks: List[MatchedChunk], redacted: str, reverse_map: Dict[str, str], synthetic_content: Optional[str] = None) -> Optional[str]:
         if not chunks:
             return None
         msg = chunks[0].message
-        mtype, cat, conf = _classify_message(msg.get("role", ""), msg.get("content", ""))
+        # When the caller passes ``synthetic_content`` (a session-level
+        # summary string), classify from *that* text rather than from the
+        # arbitrary first chunk. Otherwise the row's memory_type / category /
+        # confidence would be driven by a single message, not the summary
+        # actually being persisted as ``content``.
+        classify_text = synthetic_content if synthetic_content else msg.get("content", "")
+        mtype, cat, conf = _classify_message(msg.get("role", ""), classify_text)
         if not mtype:
             return None
         idempotency_key = _make_sqlite_idempotency_key(msg)
+        if synthetic_content:
+            # Distinguish aggregated-session rows from single-message rows
+            # so re-runs of the bridge can detect and dedupe them.
+            idempotency_key = f"agg:{idempotency_key}"
         metadata = {"sqlite_idempotency_key": idempotency_key}
         session_id = msg.get("session_id", "")
         role = msg.get("role", "")
@@ -791,7 +926,10 @@ class BridgeRunner:
                             match_score=session_chunks[0].match_score,
                             session_meta=session_chunks[0].session_meta,
                         )
-                        self.writer.write_sqlite_evidence([synthetic], redacted, rev_map)
+                        # Pass the actual summary text through so the row's
+                        # memory_type / category / confidence reflect the
+                        # content being persisted, not the first message.
+                        self.writer.write_sqlite_evidence([synthetic], redacted, rev_map, synthetic_content=summary)
                     except Exception as e:
                         self.stats["rows_errored"] += 1
                         print(json.dumps({"event": "sqlite_write_error", "session_id": sid, "error": str(e)}))
@@ -809,13 +947,22 @@ class BridgeRunner:
 
         sqlite_scanner.close()
 
-        if not self.config.dry_run:
+        # Merge writer tallies into the runner's accumulated counts *before*
+        # deciding whether to advance checkpoints. The runner's own
+        # ``rows_errored`` includes redaction failures and any per-anchor
+        # errors that never made it to the writer.
+        self.stats["rows_inserted"] = self.stats.get("rows_inserted", 0) + self.writer.inserted
+        self.stats["rows_skipped"] = self.stats.get("rows_skipped", 0) + self.writer.skipped
+        self.stats["rows_errored"] = self.stats.get("rows_errored", 0) + self.writer.errored
+
+        # Only advance the checkpoint when the run finished cleanly. A
+        # partial-failure run that touched ``max_msg_id`` would otherwise
+        # permanently skip every vault file or SQLite message that errored
+        # on this run, because the next incremental scan starts past it.
+        if not self.config.dry_run and self.stats["rows_errored"] == 0:
             self.writer.save_checkpoint("vault", max_msg_id, self.stats)
             self.writer.save_checkpoint("sqlite", max_msg_id, self.stats)
 
-        self.stats["rows_inserted"] = self.writer.inserted
-        self.stats["rows_skipped"] = self.writer.skipped
-        self.stats["rows_errored"] = self.writer.errored
         self.stats["runtime_seconds"] = round(time.time() - start, 2)
 
         self._report()

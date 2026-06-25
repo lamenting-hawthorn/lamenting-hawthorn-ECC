@@ -79,6 +79,7 @@ create table memory.typed_memory (
                     check (source in (
                         'user_utterance', 'tool_result', 'agent_inference',
                         'knowledge_base_import', 'hermes_import',
+                        'skillloop_proposal', 'vault_bridge',
                         'system_generated', 'test'
                     )),
     embedding       vector(1536),

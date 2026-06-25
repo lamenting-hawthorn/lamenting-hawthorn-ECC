@@ -27,8 +27,8 @@ from redaction import pseudonymize_payload
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-DEFAULT_PROJECT_ROOT = os.path.expanduser("<HOME>/agent_architecture")
-DEFAULT_SKILLLOOP_ROOT = os.path.expanduser("<HOME>/skillloop")
+DEFAULT_PROJECT_ROOT = os.path.expanduser("~/agent_architecture")
+DEFAULT_SKILLLOOP_ROOT = os.path.expanduser("~/skillloop")
 DEFAULT_DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql:///agent_memory")
 DEFAULT_MIN_SCORE = 70
 DEFAULT_AUTO_APPLY_THRESHOLD = 85
@@ -49,6 +49,12 @@ VALID_CATEGORIES = (
 # ---------------------------------------------------------------------------
 @dataclass
 class ConnectorConfig:
+    """Resolved configuration for a single connector run.
+
+    Built from CLI args + env vars; ``mode`` is one of ``"full"`` /
+    ``"incremental"`` and ``dry_run`` only prints intended writes.
+    """
+
     project_root: Path
     skillloop_root: Path
     database_url: str
@@ -60,6 +66,14 @@ class ConnectorConfig:
 
 @dataclass
 class SkillLoopProposal:
+    """A single SkillLoop memory proposal ready to be written to Postgres.
+
+    The ``content`` field is the (possibly redacted) memory text;
+    ``score`` / ``evaluator`` / ``trace_id`` are best-effort fallbacks
+    backfilled from the SkillLoop SQLite database when the on-disk file
+    lacks frontmatter.
+    """
+
     proposal_id: str
     content: str
     score: int = 0
@@ -76,6 +90,12 @@ class SkillLoopProposal:
 # Helpers
 # ---------------------------------------------------------------------------
 def _is_hex_id(stem: str) -> bool:
+    """Return ``True`` when ``stem`` is a 32-character lowercase hex string.
+
+    SkillLoop writes approved memory files using the proposal's UUID as
+    the filename; this helper is used to pick those out from other files
+    that may live in the approved directory (READMEs, MOCs, etc.).
+    """
     return bool(re.fullmatch(r"[a-f0-9]{32}", stem.lower()))
 
 
@@ -169,6 +189,11 @@ def _classify(content: str, tags: List[str], suggested_mtype: Optional[str], sug
 
 
 def _score_to_confidence(score: int) -> float:
+    """Convert a 0–100 SkillLoop score to a 0–1 typed_memory confidence.
+
+    Scores are clamped to 0.95 so a perfect 100 is still distinguishable
+    from a hand-set 1.0 and the schema CHECK constraint is respected.
+    """
     return min(score / 100.0, 0.95)
 
 
@@ -176,18 +201,29 @@ def _score_to_confidence(score: int) -> float:
 # SkillLoopReader
 # ---------------------------------------------------------------------------
 class SkillLoopReader:
+    """Read SkillLoop proposals from the approved-memories directory and
+    backfill missing metadata (score / trace_id / evaluator) from the
+    SkillLoop SQLite database when possible."""
+
     def __init__(self, project_root: Path, skillloop_root: Path) -> None:
+        """Resolve the approved-memories dir and the SkillLoop SQLite path.
+
+        The reader does not open the DB until :meth:`_db` is first called,
+        so missing or unreadable DB files are not fatal.
+        """
         self.approved_dir = project_root / ".skillloop" / "approved" / "memory"
         self.db_path = skillloop_root / ".skillloop" / "skillloop.db"
         self._db_cache: Optional[sqlite3.Connection] = None
 
     def _db(self) -> Optional[sqlite3.Connection]:
+        """Lazily open the SkillLoop SQLite DB; return ``None`` if it is absent."""
         if self._db_cache is None and self.db_path.exists():
             self._db_cache = sqlite3.connect(str(self.db_path))
             self._db_cache.row_factory = sqlite3.Row
         return self._db_cache
 
     def _lookup_proposal(self, proposal_id: str) -> Optional[Dict[str, Any]]:
+        """Return the SQLite row for ``proposal_id`` or ``None`` if not found."""
         db = self._db()
         if db is None:
             return None
@@ -260,22 +296,25 @@ class SkillLoopReader:
             yield proposal
 
     def iter_auto_apply(self, threshold: int) -> Iterator[SkillLoopProposal]:
-        """Query skillloop.db for requires_review proposals with score >= threshold.
+        """Query skillloop.db for *approved* memory proposals whose score is high enough
+        to be auto-applied without further review.
 
-        Since the current schema doesn't have a 'requires_review' status, we look for
-        'pending' proposals with matching evaluations.
+        The original implementation filtered on ``p.status = 'pending'``, which
+        bypassed the human-review gate described in the PR objective/design and
+        could let unapproved memories reach durable storage. We now require
+        ``status = 'approved'`` here; pending proposals must clear review first.
         """
         db = self._db()
         if db is None:
             return
-        
+
         rows = db.execute(
             """
             SELECT p.id, p.trace_id, p.kind, p.status, p.payload,
                    e.score, e.payload as eval_payload
             FROM proposals p
             LEFT JOIN evaluations e ON p.trace_id = e.trace_id
-            WHERE p.status = 'pending' AND p.kind = 'memory'
+            WHERE p.status = 'approved' AND p.kind = 'memory'
             ORDER BY e.created_at DESC
             """
         ).fetchall()
@@ -431,6 +470,7 @@ class PostgresWriter:
             except Exception as e:
                 self.errored += 1
                 print(json.dumps({"event": "memory_error", "proposal_id": proposal.proposal_id, "error": str(e)}))
+                conn.rollback()
                 return None
 
             if row is None:
@@ -439,38 +479,54 @@ class PostgresWriter:
                 return None
 
             tm_id = str(row["id"])
-            self.inserted += 1
 
             # Audit log
-            conn.execute(
-                """
-                INSERT INTO memory.audit_log (event_type, user_id, session_id, target_id, details)
-                VALUES ('memory_written', %s, %s, %s, %s)
-                """,
-                (
-                    ACTOR_ID,
-                    proposal.trace_id,
-                    tm_id,
-                    psycopg.types.json.Jsonb({
-                        "skillloop_proposal_id": proposal.proposal_id,
-                        "source": "skillloop",
-                        "memory_type": mtype,
-                        "category": cat,
-                    }),
-                ),
-            )
-            
-            # Track import
-            conn.execute(
-                """
-                INSERT INTO memory.skillloop_imports (proposal_id, memory_id)
-                VALUES (%s, %s)
-                ON CONFLICT (proposal_id) DO NOTHING
-                """,
-                (proposal.proposal_id, tm_id),
-            )
-            
-            conn.commit()
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO memory.audit_log (event_type, user_id, session_id, target_id, details)
+                    VALUES ('memory_written', %s, %s, %s, %s)
+                    """,
+                    (
+                        ACTOR_ID,
+                        proposal.trace_id,
+                        tm_id,
+                        psycopg.types.json.Jsonb({
+                            "skillloop_proposal_id": proposal.proposal_id,
+                            "source": "skillloop",
+                            "memory_type": mtype,
+                            "category": cat,
+                        }),
+                    ),
+                )
+
+                # Track import
+                conn.execute(
+                    """
+                    INSERT INTO memory.skillloop_imports (proposal_id, memory_id)
+                    VALUES (%s, %s)
+                    ON CONFLICT (proposal_id) DO NOTHING
+                    """,
+                    (proposal.proposal_id, tm_id),
+                )
+
+                conn.commit()
+            except Exception as e:
+                # Roll back the entire transaction so a partial write
+                # (typed_memory row without an audit log / import row) is
+                # never reported as a successful insert.
+                conn.rollback()
+                self.errored += 1
+                print(json.dumps({
+                    "event": "memory_error",
+                    "proposal_id": proposal.proposal_id,
+                    "stage": "audit_or_import",
+                    "error": str(e),
+                }))
+                return None
+
+            # Increment *after* the whole transaction commits successfully.
+            self.inserted += 1
             print(json.dumps({"event": "memory_written", "proposal_id": proposal.proposal_id, "memory_id": tm_id, "memory_type": mtype, "category": cat}))
             return tm_id
 
@@ -559,9 +615,13 @@ class ConnectorRunner:
                 print(json.dumps({"event": "write_error", "proposal_id": proposal.proposal_id, "error": str(e)}))
                 continue
 
-        self.stats["rows_inserted"] = self.writer.inserted
-        self.stats["rows_skipped"] = self.writer.skipped
-        self.stats["rows_errored"] = self.writer.errored
+        # Merge writer counts into runner stats. Use the runner's own
+        # ``rows_errored`` (which includes redaction and write failures) as
+        # the source of truth, and only *add* the writer's tallies on top so
+        # neither side overwrites the other's failure accounting.
+        self.stats["rows_inserted"] = self.stats.get("rows_inserted", 0) + self.writer.inserted
+        self.stats["rows_skipped"] = self.stats.get("rows_skipped", 0) + self.writer.skipped
+        self.stats["rows_errored"] = self.stats.get("rows_errored", 0) + self.writer.errored
         self.stats["runtime_seconds"] = round(time.time() - start, 2)
 
         self._report()

@@ -62,12 +62,14 @@ worker in Postgres but is not currently wired to that runtime.
 
 Build: `scripts/import_sessions.py` — reads `<HERMES_HOME>/sessions.db`,
 extracts user/assistant message pairs, and pushes them into
-`event_store.events` + `memory.typed_memory` with proper
-`actor_id` / `org_id` / `role` / `visibility`.
+`event_store.events` only.
 
-After the bridge, the event worker (now working) will pick them up and
-write them to typed_memory. From that point on, every chat the user has
-with Hermes lives in Postgres, queryable with SQL.
+After the bridge writes events, the event worker (now working) is the
+single writer to `memory.typed_memory`. **The bridge does not write
+typed_memory directly** — that single-writer path keeps idempotency
+boundary simple and prevents the bridge and worker from racing on the
+same content. From that point on, every chat the user has with Hermes
+lives in Postgres, queryable with SQL.
 
 ### 2. Backfill or skip?
 
@@ -93,7 +95,11 @@ pg_dump -Fc agent_memory > ~/backups/agent_memory-$(date +%Y%m%d).dump
 
 # Monthly, manual rehearsal
 createdb agent_memory_restore
-pg_restore -d agent_memory_restore ~/backups/agent_memory-latest.dump
+# Restore the most recent dated dump. Using the same ``YYYYMMDD`` pattern
+# the nightly job writes means the restore line matches the file the
+# backup step actually produced. ``ls -1t`` returns the newest dated file
+# first, so we pick that.
+pg_restore -d agent_memory_restore "$(ls -1t ~/backups/agent_memory-*.dump | head -n 1)"
 # Spot-check: row counts in memory.typed_memory match expected
 ```
 

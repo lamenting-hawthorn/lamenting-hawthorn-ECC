@@ -477,14 +477,23 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agent_architecture.n
 ### Linux cron equivalent
 
 ```cron
-# SkillLoop controller — top of every hour
-0 * * * * DATABASE_URL=postgresql:///agent_memory ACTOR_ID=owner:<USER> <PYTHON_PATH> <HOME>/agent_architecture/scripts/connect_skillloop.py >> <HOME>/logs/controller.log 2>&1
+# SkillLoop controller — top of every hour.
+# Cron interprets bare ``<`` and ``>`` as I/O redirections, so we expand
+# the path placeholders into shell variables at the top of the crontab and
+# reference them below. This keeps the entries copy/paste-safe.
+PYTHON_BIN=/usr/bin/python3
+REPO_ROOT=$HOME/agent_architecture
+LOG_DIR=$HOME/logs
+ACTOR_ID=owner:$(whoami)
+TELEGRAM_USER_ID=123456789   # <- replace with your Telegram numeric user id
+
+0 * * * * DATABASE_URL=postgresql:///agent_memory ACTOR_ID=$ACTOR_ID $PYTHON_BIN $REPO_ROOT/scripts/connect_skillloop.py >> $LOG_DIR/controller.log 2>&1
 
 # Vault bridge — 5 minutes past every hour
-5 * * * * DATABASE_URL=postgresql:///agent_memory ACTOR_ID=owner:<USER> <PYTHON_PATH> <HOME>/agent_architecture/scripts/bridge_vault_and_sessions.py --mode incremental >> <HOME>/logs/bridge.log 2>&1
+5 * * * * DATABASE_URL=postgresql:///agent_memory ACTOR_ID=$ACTOR_ID $PYTHON_BIN $REPO_ROOT/scripts/bridge_vault_and_sessions.py --mode incremental >> $LOG_DIR/bridge.log 2>&1
 
 # Notifier — 10 minutes past every hour
-10 * * * * DATABASE_URL=postgresql:///agent_memory TELEGRAM_USER_ID=<TELEGRAM_USER_ID> <PYTHON_PATH> <HOME>/agent_architecture/scripts/notify_review.py >> <HOME>/logs/notify.log 2>&1
+10 * * * * DATABASE_URL=postgresql:///agent_memory TELEGRAM_USER_ID=$TELEGRAM_USER_ID $PYTHON_BIN $REPO_ROOT/scripts/notify_review.py >> $LOG_DIR/notify.log 2>&1
 ```
 
 ## Design Docs

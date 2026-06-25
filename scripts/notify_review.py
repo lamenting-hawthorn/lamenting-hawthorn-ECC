@@ -15,18 +15,36 @@ from datetime import datetime, timezone
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-SKILLLOOP_DB = os.path.expanduser("<HOME>/agent_architecture/.skillloop/skillloop.db")
+# Defaults use ``$HOME`` (so ``os.path.expanduser`` resolves them on every
+# platform) and let users override individual paths via environment variables.
+# The previous literal ``<HOME>`` and ``<TELEGRAM_USER_ID>`` strings were
+# passed straight through ``expanduser``, so the bot-token lookup and the
+# SkillLoop DB detection silently failed.
+SKILLLOOP_DB = os.path.expanduser(
+    os.environ.get(
+        "SKILLLOOP_DB",
+        "~/agent_architecture/.skillloop/skillloop.db",
+    )
+)
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql:///agent_memory")
-TELEGRAM_USER_ID = os.environ.get("TELEGRAM_USER_ID", "<TELEGRAM_USER_ID>")
-ENV_PATH = os.path.expanduser("<HOME>/.hermes/.env")
+TELEGRAM_USER_ID = os.environ.get("TELEGRAM_USER_ID", "")
+ENV_PATH = os.path.expanduser(
+    os.environ.get("HERMES_ENV_PATH", "~/.hermes/.env")
+)
 
 
 def _log(msg: str) -> None:
+    """Write a timestamped line to stdout (used for cron / launchd log scraping)."""
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{ts}] {msg}", flush=True)
 
 
 def _load_bot_token() -> str | None:
+    """Read the Telegram bot token from the user's ``.hermes/.env`` file.
+
+    Returns the token string, or ``None`` if the file is missing, unreadable,
+    or does not define ``TELEGRAM_BOT_TOKEN``.
+    """
     try:
         with open(ENV_PATH, "r", encoding="utf-8") as f:
             for line in f:
@@ -38,6 +56,8 @@ def _load_bot_token() -> str | None:
 
 
 def _count_pending_proposals() -> int:
+    """Return the number of memory-kind SkillLoop proposals still in
+    ``pending`` status, or 0 if the SkillLoop DB is missing or unreadable."""
     if not os.path.exists(SKILLLOOP_DB):
         _log("skillloop db not ready")
         return 0
@@ -56,6 +76,9 @@ def _count_pending_proposals() -> int:
 
 
 def _count_recent_imports() -> int:
+    """Return the number of ``source = 'skillloop_proposal'`` rows inserted
+    into ``memory.typed_memory`` in the last hour, or 0 if Postgres is
+    unavailable or the query fails."""
     try:
         import psycopg
     except ImportError:
@@ -81,6 +104,13 @@ def _count_recent_imports() -> int:
 
 
 def _send_message(token: str, text: str) -> bool:
+    """POST ``text`` to the configured Telegram chat via the bot API.
+
+    Returns ``True`` if Telegram accepted the message (``ok`` in the
+    response body), ``False`` for transport or API errors. Network failures
+    are caught and logged so the caller can decide whether to fail the
+    overall run.
+    """
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = json.dumps(
         {
@@ -112,10 +142,25 @@ def _send_message(token: str, text: str) -> bool:
 
 
 def main() -> int:
+    """Build the digest text and deliver it to Telegram.
+
+    Exit codes:
+
+    * ``0`` — message delivered successfully.
+    * ``1`` — Telegram rejected the message or the request failed.
+    * ``2`` — required configuration is missing (``TELEGRAM_BOT_TOKEN`` or
+      ``TELEGRAM_USER_ID``); the run cannot deliver anything.
+    """
     token = _load_bot_token()
     if not token:
         _log("TELEGRAM_BOT_TOKEN not found")
-        return 0
+        # Surface a missing token to schedulers (cron / launchd) instead of
+        # pretending the run was healthy. A broken notification path must
+        # show up in monitor output, not in a silent 0 exit.
+        return 2
+    if not TELEGRAM_USER_ID:
+        _log("TELEGRAM_USER_ID not configured")
+        return 2
 
     pending = _count_pending_proposals()
     recent = _count_recent_imports()
@@ -136,7 +181,9 @@ def main() -> int:
         lines.append("Run: skillloop --path ~/agent_workspace review list")
         text = "\n".join(lines)
 
-    _send_message(token, text)
+    if not _send_message(token, text):
+        # Telegram delivery itself failed — propagate that to the scheduler.
+        return 1
     return 0
 
 

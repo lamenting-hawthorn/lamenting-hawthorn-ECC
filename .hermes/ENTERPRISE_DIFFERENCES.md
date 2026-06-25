@@ -175,8 +175,13 @@ In enterprise, NOTHING gets `visibility='org'` without a row in this table with 
 
 The current `.env.example` uses `DATABASE_URL=postgresql:///agent_memory` (local socket). Enterprise needs:
 - **Primary:** Writes, event worker, admin mutations.
-- **Read replica:** Chat-path retrieval, analytics, audit log queries.
-- The application must route `SELECT` queries to the replica and `INSERT/UPDATE` to the primary.
+- **Read replica:** Lag-tolerant reads only — analytics dashboards, audit log
+  queries, and chat-path retrieval that is happy to be a few seconds stale.
+  The application must keep **read-after-write and approval flows** on the
+  primary: typed_memory inserts, audit log writes, the SkillLoop connector,
+  the vault bridge, and the event worker. Routing every `SELECT` to the
+  replica would silently break "the user just approved this memory, is it in
+  the system?" assertions.
 
 ### Shared schema with RLS vs per-customer schema isolation
 

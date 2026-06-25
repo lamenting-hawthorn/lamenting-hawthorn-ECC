@@ -24,7 +24,7 @@ DATABASE_URL=postgresql:///agent_memory <PYTHON_PATH> src/test_guardrails.py
 5. **WhatsApp adapter role resolution** — `test_all_phases.py:phase5_adapter` expects "owner" but gets "team". The adapter (`src/adapters/whatsapp.py`) needs the right precedence order.
 
 ## State file
-`<HOME>/agent_architecture/.hermes/STATE.md`
+`<HOME>/agent_architecture/docs/internal/STATE.md`
 
 ## Each tick:
 
@@ -32,7 +32,7 @@ DATABASE_URL=postgresql:///agent_memory <PYTHON_PATH> src/test_guardrails.py
 Read STATE.md to understand current progress and what happened last run.
 
 ### 2. Check the goal (CHECKER subagent — DIFFERENT model)
-Delegate to a checker with goal: "Run all 9 commands in the Goal condition block of <HOME>/agent_architecture/.hermes/loops/hardening_goal.md. Return PASS/FAIL with the failing command and exit code for each FAIL."
+Delegate to a checker with goal: "Run all 9 commands in the Goal condition block of <HOME>/agent_architecture/docs/internal/loops/hardening_goal.md. Return PASS/FAIL with the failing command and exit code for each FAIL."
 
 ### 3. If goal is MET:
 - Update STATE.md "Stop conditions met since last review" with timestamp
@@ -40,7 +40,7 @@ Delegate to a checker with goal: "Run all 9 commands in the Goal condition block
 - Self-cancel: find this job by name, then `cronjob(action='remove', job_id=...)`
 
 ### 4. If goal is NOT met:
-- Delegate to a worker subagent with goal: "Make progress on the next unfished item in priority order from <HOME>/agent_architecture/.hermes/loops/hardening_goal.md 'Work to do' section. State file at .hermes/STATE.md. Constraint: prefer minimal, surgical changes. Do not refactor. Do not add features not in the list. Update STATE.md before returning."
+- Delegate to a worker subagent with goal: "Make progress on the next unfished item in priority order from <HOME>/agent_architecture/docs/internal/loops/hardening_goal.md 'Work to do' section. State file at docs/internal/STATE.md. Constraint: prefer minimal, surgical changes. Do not refactor. Do not add features not in the list. Update STATE.md before returning."
 - After worker returns, run the smoke test inline. If it passes, dispatch the checker on all 9 commands.
 
 ### 5. Update STATE.md
