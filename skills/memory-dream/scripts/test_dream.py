@@ -67,6 +67,63 @@ class TestImports(unittest.TestCase):
         self.assertTrue(callable(build_prompt))
         self.assertTrue(callable(parse_response))
 
+    def test_build_prompt_escapes_braces(self):
+        # Memory rows / user instructions / session excerpts may
+        # legitimately contain ``{`` or ``}`` (JSON, code snippets).
+        # Without escaping, PROMPT_TEMPLATE.format() raises
+        # KeyError / IndexError on any unmatched brace.
+        from parser import MemoryEntry, ParsedStore
+        from synthesizer import build_prompt
+
+        entries = [
+            MemoryEntry(
+                row_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                text='{ "json": "in memory text" }',  # braces
+                memory_type="semantic", category="fact",
+                confidence=0.9, source="user_utterance", visibility="owner_only",
+                user_id="u_test", created_at="2026-06-25T00:00:00Z",
+                index=0, hash="",
+            ),
+        ]
+        store = ParsedStore(
+            user_id="u_test", entries=entries, char_count=len(entries[0].text),
+        )
+        # Should not raise — the braces must be escaped before
+        # reaching str.format().
+        prompt = build_prompt(
+            store,
+            session_excerpts="user said: {not_a_var}",
+            sess_count=1, sess_chars=20,
+            instructions='instructions: {also_not_a_var}',
+        )
+        # And the escaped braces should appear in the rendered prompt
+        # (so the LLM can see them as literal text).
+        self.assertIn('{{ "json": "in memory text" }}', prompt)
+        self.assertIn('{{not_a_var}}', prompt)
+
+    def test_build_prompt_recency_preserved(self):
+        # Verify the recency tiebreak is used as documented in
+        # find_semantic_dupes (canonical = lowest index, then
+        # confidence desc).
+        from parser import MemoryEntry, ParsedStore
+        from synthesizer import build_prompt
+
+        entries = [
+            MemoryEntry(
+                row_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1",
+                text="old fact, low confidence",
+                memory_type="semantic", category="fact",
+                confidence=0.5, source="user_utterance",
+                visibility="owner_only", user_id="u_test",
+                created_at="2026-06-25T00:00:00Z", index=0, hash="",
+            ),
+        ]
+        store = ParsedStore(
+            user_id="u_test", entries=entries, char_count=30,
+        )
+        prompt = build_prompt(store, "(none)", 0, 0)
+        self.assertIn("old fact, low confidence", prompt)
+
     def test_controller_imports(self):
         import controller
         # Spot-check the public API.

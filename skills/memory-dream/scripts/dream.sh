@@ -24,15 +24,27 @@ export DATABASE_URL="${DATABASE_URL:-postgresql:///agent_memory}"
 export ACTOR_ID="${ACTOR_ID:-u_owner}"
 export PYTHONUNBUFFERED=1
 
-# If a .env file exists at the repo root, source it. We look for
-# LLM_API_KEY specifically (the only key the dream pipeline needs
-# at runtime; the rest of the runtime's config comes from the
-# launchd plist's EnvironmentVariables).
+# If a .env file exists at the repo root, parse it. We deliberately
+# avoid `source` (which executes arbitrary shell) and instead read
+# KEY=VALUE lines whose key matches a strict identifier pattern.
+# Only LLM_API_KEY-style variables are exported; comments, blank
+# lines, and non-matching lines are silently ignored.
 if [[ -f "$REPO_ROOT/.env" ]]; then
-    set -a
-    # shellcheck disable=SC1091
-    source "$REPO_ROOT/.env"
-    set +a
+    while IFS='=' read -r key value; do
+        # Skip blank lines and comments.
+        [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]] && continue
+        # Only allow known LLM env vars, identified by name only.
+        case "$key" in
+            LLM_API_KEY|OPENAI_API_KEY|NVIDIA_API_KEY|ANTHROPIC_API_KEY|LLM_BASE_URL|LLM_MODEL)
+                # Strip optional surrounding single or double quotes.
+                value="${value%\"}"
+                value="${value#\"}"
+                value="${value%\'}"
+                value="${value#\'}"
+                export "$key=$value"
+                ;;
+        esac
+    done < "$REPO_ROOT/.env"
 fi
 
 # Add the repo root to PYTHONPATH so the dream scripts can import

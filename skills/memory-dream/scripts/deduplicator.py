@@ -200,8 +200,10 @@ def find_semantic_dupes(
     """
     Find typed_memory rows whose pgvector cosine similarity is at or
     above ``threshold`` AND whose memory_type + category match. Pairs
-    are returned as 2-member groups (the canonical is the more
-    confident one).
+    are returned as 2-member groups; the canonical is the
+    parser-preferred entry (lowest index) with confidence descending
+    as a tiebreaker. The canonical is placed first in ``members`` so
+    downstream consumers see a consistent ordering.
 
     Permission scope is taken from ``store.user_id``: only rows
     owned by the same actor are compared. This is a safety property
