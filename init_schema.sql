@@ -235,6 +235,67 @@ create table memory.diagnostic_reports (
 );
 
 -- =================================================================
+-- 2i. DREAM PROPOSALS (batch memory curation staging)
+-- =================================================================
+-- Populated by skills/memory-dream/scripts/dream.py. One row per
+-- proposed action on an existing typed_memory row. ``adopt`` flips
+-- the row to ``adopted`` and writes the actual change to typed_memory
+-- (with superseded_by / audit_log). ``reject`` records the decision
+-- without touching typed_memory.
+
+create table memory.dream_proposals (
+    id                          uuid not null default gen_random_uuid(),
+    run_id                      uuid not null,
+    row_id                      uuid not null references memory.typed_memory(id) on delete cascade,
+    action                      text not null
+                                check (action in (
+                                    'keep', 'merge', 'supersede',
+                                    'archive', 'flag_for_review'
+                                )),
+    proposed_replacement        text,
+    proposed_superseded_by_id   uuid references memory.typed_memory(id),
+    confidence                  real not null default 0.5
+                                check (confidence >= 0 and confidence <= 1.0),
+    rationale                   text not null,
+    reviewer_action             text
+                                check (reviewer_action in ('adopted', 'rejected') or reviewer_action is null),
+    reviewed_at                 timestamptz,
+    created_at                  timestamptz not null default now(),
+
+    constraint dream_proposals_pk primary key (id),
+    constraint dream_proposals_unique_row unique (run_id, row_id)
+);
+
+create index idx_dream_proposals_run on memory.dream_proposals (run_id, created_at);
+create index idx_dream_proposals_pending
+    on memory.dream_proposals (created_at desc)
+    where reviewer_action is null;
+
+-- =================================================================
+-- 2j. DREAM RUNS (one row per dream.py invocation, run metadata)
+-- =================================================================
+
+create table memory.dream_runs (
+    run_id              uuid not null default gen_random_uuid(),
+    started_at          timestamptz not null default now(),
+    finished_at         timestamptz,
+    model               text,
+    rows_scanned        integer not null default 0,
+    proposals_count     integer not null default 0,
+    adopted_count       integer not null default 0,
+    rejected_count      integer not null default 0,
+    summary             text,
+    instructions        text,
+    status              text not null default 'in_progress'
+                        check (status in ('in_progress', 'completed', 'failed', 'discarded')),
+    error_message       text,
+
+    constraint dream_runs_pk primary key (run_id)
+);
+
+create index idx_dream_runs_status on memory.dream_runs (status, started_at desc);
+
+-- =================================================================
 -- 3. INDEXES
 -- =================================================================
 

@@ -1,0 +1,701 @@
+"""
+controller.py — Manage the dream staging tables and adopt / discard
+operations.
+
+In hermes-dream, staging is a directory on disk (``~/.hermes/memories/.staging/``)
+holding five files. Here, staging is two Postgres tables:
+
+  - ``memory.dream_runs``      — one row per dream.py invocation
+                                 (started_at, finished_at, model, summary,
+                                 status, instructions)
+  - ``memory.dream_proposals`` — one row per (run, typed_memory row)
+                                 with the action, the optional replacement
+                                 text or replacement row_id, the model's
+                                 confidence, and the human's
+                                 reviewer_action (``adopted`` / ``rejected``)
+
+On ``adopt``, every proposal whose ``reviewer_action`` is null is
+processed in a single transaction:
+
+  - ``keep``         — no-op
+  - ``merge``        — UPDATE the row's content to the proposed_replacement,
+                       lower the confidence by 0.1 to mark the rewrite
+  - ``supersede``    — UPDATE the loser's ``superseded_by`` to point at
+                       the winner, INSERT a ``supersedes`` edge into
+                       ``memory.memory_edges`` for the graph layer
+  - ``archive``      — UPDATE the row to set ``expires_at = now() + 30d``
+                       so the TTL cleanup picks it up
+  - ``flag_for_review`` — UPDATE the row to add a ``metadata.dream_flag``
+                          jsonb entry; the next notify_review.py will
+                          surface it
+
+Every write also emits a ``memory_written`` row into ``memory.audit_log``
+with ``details`` describing what changed and which dream run triggered
+it. That keeps the audit chain intact.
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Iterable, List, Optional
+from uuid import UUID, uuid4
+
+import psycopg
+from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
+
+from parser import MemoryEntry, ParsedStore
+from synthesizer import Proposal, SynthesisResult
+
+
+DEFAULT_DATABASE_URL = "postgresql:///agent_memory"
+
+
+def _connect(database_url: str | None = None):
+    url = database_url or os.environ.get("DATABASE_URL", DEFAULT_DATABASE_URL)
+    return psycopg.connect(url, row_factory=dict_row)
+
+
+# ---------------------------------------------------------------------------
+# Run lifecycle
+# ---------------------------------------------------------------------------
+
+
+def stage_proposals(
+    run_id: str,
+    result: SynthesisResult,
+    store: ParsedStore,
+    *,
+    database_url: str | None = None,
+) -> List[str]:
+    """
+    Insert one dream_proposals row per LLM proposal. Returns the list
+    of inserted proposal ids (as strings).
+
+    Validates that every ``row_id`` exists in ``store.entries`` and that
+    ``proposed_superseded_by_id`` (if present) is also in the store.
+    Invalid proposals are silently dropped — better to skip a bad
+    proposal than to surface a hallucinated row_id to the user.
+    """
+    valid_ids = {e.row_id for e in store.entries}
+
+    with _connect(database_url) as conn:
+        inserted: list[str] = []
+        for p in result.proposals:
+            if p.row_id not in valid_ids:
+                continue
+            if p.action == "supersede":
+                if not p.proposed_superseded_by_id or p.proposed_superseded_by_id not in valid_ids:
+                    continue
+            elif p.action == "merge":
+                if not p.proposed_replacement:
+                    continue
+            row = conn.execute(
+                """
+                insert into memory.dream_proposals
+                    (run_id, row_id, action, proposed_replacement,
+                     proposed_superseded_by_id, confidence, rationale)
+                values (%s, %s, %s, %s, %s, %s, %s)
+                returning id
+                """,
+                (
+                    run_id,
+                    p.row_id,
+                    p.action,
+                    p.proposed_replacement,
+                    p.proposed_superseded_by_id,
+                    p.confidence,
+                    p.rationale,
+                ),
+            ).fetchone()
+            inserted.append(str(row["id"]))
+        conn.execute(
+            "update memory.dream_runs set proposals_count = %s where run_id = %s",
+            (len(inserted), run_id),
+        )
+        conn.commit()
+        return inserted
+
+
+def latest_run(
+    *,
+    status_filter: Optional[str] = None,
+    database_url: str | None = None,
+) -> dict | None:
+    """Return the most recent dream_runs row as a dict, or None.
+
+    The more thorough version of this function is defined further
+    down in this file; this top-of-file version exists for callers
+    that want to filter by status (e.g. "most recent completed run").
+    """
+    with _connect(database_url) as conn:
+        if status_filter:
+            row = conn.execute(
+                """
+                select * from memory.dream_runs
+                where status = %s
+                order by started_at desc
+                limit 1
+                """,
+                (status_filter,),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "select * from memory.dream_runs order by started_at desc limit 1"
+            ).fetchone()
+        return dict(row) if row else None
+
+
+def finish_run(
+    run_id: str,
+    *,
+    status: str,
+    rows_scanned: int = 0,
+    proposals_count: int = 0,
+    summary: Optional[str] = None,
+    error_message: Optional[str] = None,
+    database_url: str | None = None,
+) -> None:
+    """Mark a dream_runs row finished (completed / failed / discarded)."""
+    with _connect(database_url) as conn:
+        conn.execute(
+            """
+            update memory.dream_runs
+            set finished_at = now(),
+                status = %s,
+                rows_scanned = %s,
+                proposals_count = %s,
+                summary = %s,
+                error_message = %s
+            where run_id = %s
+            """,
+            (
+                status,
+                rows_scanned,
+                proposals_count,
+                summary or "",
+                error_message or "",
+                run_id,
+            ),
+        )
+        conn.commit()
+
+
+def has_pending_staging(*, database_url: str | None = None) -> bool:
+    """True if there's at least one dream_proposal awaiting review."""
+    return pending_proposals_count(database_url=database_url) > 0
+
+
+# ---------------------------------------------------------------------------
+# Adopt / discard
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class AdoptResult:
+    adopted: int
+    rejected: int
+    skipped: int
+    errors: list[str]
+
+
+def discard_run(run_id: str, *, database_url: str | None = None) -> int:
+    """Mark all unreviewed proposals in the run as ``rejected``.
+
+    Does not touch typed_memory. Returns the count of proposals
+    marked rejected.
+    """
+    with _connect(database_url) as conn:
+        row = conn.execute(
+            """
+            update memory.dream_proposals
+            set reviewer_action = 'rejected',
+                reviewed_at = now()
+            where run_id = %s
+              and reviewer_action is null
+            returning id
+            """,
+            (run_id,),
+        ).fetchall()
+        conn.execute(
+            "update memory.dream_runs set status = 'discarded', finished_at = now() "
+            "where run_id = %s and status not in ('completed', 'discarded', 'failed')",
+            (run_id,),
+        )
+        conn.commit()
+        return len(row)
+
+
+def adopt_run(
+    run_id: str,
+    *,
+    min_confidence: float = 0.0,
+    proposal_ids: Optional[Iterable[str]] = None,
+    actor_id: Optional[str] = None,
+    database_url: str | None = None,
+) -> AdoptResult:
+    """
+    Apply a run's proposals in a single transaction. If anything
+    fails, the entire batch is rolled back — typed_memory and
+    memory_edges never see a partial state.
+
+    Args:
+        run_id:           The dream_runs.run_id to apply.
+        min_confidence:   Skip proposals whose confidence is below
+                          this threshold. Default 0.0 (apply all).
+        proposal_ids:     Optional subset of proposal ids to apply.
+                          If None, all unreviewed proposals in the run
+                          are considered.
+        actor_id:         The actor to record in memory.audit_log.
+                          Defaults to ``$ACTOR_ID`` or ``"system:dream"``.
+    """
+    actor = actor_id or os.environ.get("ACTOR_ID", "system:dream")
+
+    with _connect(database_url) as conn:
+        with conn.transaction():
+            # Lock the proposals we're about to apply.
+            if proposal_ids is not None:
+                pid_list = list(proposal_ids)
+                proposals = conn.execute(
+                    """
+                    select p.*, m.user_id, m.memory_type, m.category
+                    from memory.dream_proposals p
+                    join memory.typed_memory m on m.id = p.row_id
+                    where p.run_id = %s
+                      and p.id = ANY(%s)
+                      and p.reviewer_action is null
+                    for update
+                    """,
+                    (run_id, pid_list),
+                ).fetchall()
+            else:
+                proposals = conn.execute(
+                    """
+                    select p.*, m.user_id, m.memory_type, m.category
+                    from memory.dream_proposals p
+                    join memory.typed_memory m on m.id = p.row_id
+                    where p.run_id = %s
+                      and p.reviewer_action is null
+                    for update
+                    """,
+                    (run_id,),
+                ).fetchall()
+
+            adopted = 0
+            rejected = 0
+            skipped = 0
+            errors: list[str] = []
+
+            for prop in proposals:
+                try:
+                    confidence = float(prop["confidence"])
+                    if confidence < min_confidence:
+                        skipped += 1
+                        _mark_proposal(conn, prop["id"], "rejected",
+                                       rationale_extra=f"skipped: confidence {confidence:.2f} < {min_confidence}")
+                        rejected += 1
+                        continue
+
+                    action = prop["action"]
+
+                    if action == "keep":
+                        _mark_proposal(conn, prop["id"], "adopted")
+                        _audit(conn, actor, prop["row_id"], "memory_read",
+                               {"dream_action": "keep", "run_id": run_id})
+                        adopted += 1
+
+                    elif action == "merge":
+                        _apply_merge(conn, prop, actor, run_id)
+                        _mark_proposal(conn, prop["id"], "adopted")
+                        adopted += 1
+
+                    elif action == "supersede":
+                        _apply_supersede(conn, prop, actor, run_id)
+                        _mark_proposal(conn, prop["id"], "adopted")
+                        adopted += 1
+
+                    elif action == "archive":
+                        _apply_archive(conn, prop, actor, run_id)
+                        _mark_proposal(conn, prop["id"], "adopted")
+                        adopted += 1
+
+                    elif action == "flag_for_review":
+                        _apply_flag(conn, prop, actor, run_id)
+                        _mark_proposal(conn, prop["id"], "adopted")
+                        adopted += 1
+
+                    else:
+                        # Unknown action — treat as skip.
+                        skipped += 1
+                        _mark_proposal(conn, prop["id"], "rejected",
+                                       rationale_extra=f"unknown action: {action}")
+                        rejected += 1
+                except Exception as exc:
+                    errors.append(f"proposal {prop['id']}: {exc}")
+                    skipped += 1
+                    # Mark this proposal as rejected and re-raise so the
+                    # transaction rolls back. The user can re-run after
+                    # fixing the underlying issue.
+                    raise
+
+            # Update run counters.
+            conn.execute(
+                """
+                update memory.dream_runs
+                set status = 'completed',
+                    finished_at = now(),
+                    adopted_count = %s,
+                    rejected_count = %s
+                where run_id = %s
+                """,
+                (adopted, rejected, run_id),
+            )
+            # The transaction commits on context exit.
+
+            return AdoptResult(adopted=adopted, rejected=rejected, skipped=skipped, errors=errors)
+
+
+# ---------------------------------------------------------------------------
+# Per-action writeback helpers (run inside the adopt transaction)
+# ---------------------------------------------------------------------------
+
+
+def _mark_proposal(conn, proposal_id, action, *, rationale_extra: str = "") -> None:
+    conn.execute(
+        """
+        update memory.dream_proposals
+        set reviewer_action = %s,
+            reviewed_at = now()
+        where id = %s
+        """,
+        (action, proposal_id),
+    )
+
+
+def _audit(conn, actor, target_id, event_type, details: dict) -> None:
+    conn.execute(
+        """
+        insert into memory.audit_log
+            (event_type, user_id, target_id, details)
+        values (%s, %s, %s, %s)
+        """,
+        (event_type, actor, target_id, Jsonb(details)),
+    )
+
+
+def _apply_merge(conn, prop, actor, run_id) -> None:
+    """Replace the row's content with proposed_replacement.
+
+    We do NOT delete the row — we update its ``content`` and lower
+    ``confidence`` by 0.1 to mark the rewrite. The row keeps its
+    original ``id`` so any edges / audit history that point to it
+    stay valid.
+    """
+    new_text = (prop["proposed_replacement"] or "").strip()
+    if not new_text:
+        raise ValueError(f"merge proposal {prop['id']} has empty proposed_replacement")
+    conn.execute(
+        """
+        update memory.typed_memory
+        set content = %s,
+            confidence = greatest(confidence - 0.1, 0.0),
+            updated_at = now(),
+            metadata = metadata || jsonb_build_object('dream_merged_at', now(),
+                                                     'dream_run_id', %s::text)
+        where id = %s
+        """,
+        (new_text, run_id, prop["row_id"]),
+    )
+    _audit(conn, actor, prop["row_id"], "memory_updated", {
+        "dream_action": "merge",
+        "run_id": run_id,
+        "old_text_preview": (prop["content"] or "")[:120],
+        "new_text_preview": new_text[:120],
+    })
+
+
+def _apply_supersede(conn, prop, actor, run_id) -> None:
+    """Mark the loser row as superseded by the winner.
+
+    Loser:  ``superseded_by`` set, ``confidence`` halved.
+    Winner: ``confidence`` boosted by 0.05 (capped at 1.0).
+    Edge:   a ``supersedes`` row in ``memory.memory_edges``
+            (source_id = winner, target_id = loser).
+    """
+    winner_id = prop["proposed_superseded_by_id"]
+    loser_id = prop["row_id"]
+    if not winner_id:
+        raise ValueError(f"supersede proposal {prop['id']} missing proposed_superseded_by_id")
+    if winner_id == loser_id:
+        raise ValueError(f"supersede proposal {prop['id']} self-references")
+
+    # Loser
+    conn.execute(
+        """
+        update memory.typed_memory
+        set superseded_by = %s,
+            confidence = confidence * 0.5,
+            updated_at = now(),
+            metadata = metadata || jsonb_build_object('dream_superseded_at', now(),
+                                                     'dream_run_id', %s::text)
+        where id = %s
+        """,
+        (winner_id, run_id, loser_id),
+    )
+    # Winner
+    conn.execute(
+        """
+        update memory.typed_memory
+        set confidence = least(confidence + 0.05, 1.0),
+            updated_at = now(),
+            metadata = metadata || jsonb_build_object('dream_supersede_target_at', now(),
+                                                     'dream_run_id', %s::text)
+        where id = %s
+        """,
+        (run_id, winner_id),
+    )
+    # Edge — use the typed_memory ids as edge endpoint strings.
+    # (memory_edges.source_id / target_id are text in the schema.)
+    conn.execute(
+        """
+        insert into memory.memory_edges
+            (source_id, target_id, edge_type, weight, created_by, metadata)
+        values (%s, %s, 'supersedes', 1.0, 'agent_inference',
+                jsonb_build_object('dream_run_id', %s::text, 'loser_row_id', %s::text))
+        on conflict (source_id, target_id, edge_type) do update
+            set weight = least(memory_edges.weight + 0.1, 1.0)
+        """,
+        (str(winner_id), str(loser_id), run_id, str(loser_id)),
+    )
+    _audit(conn, actor, loser_id, "memory_updated", {
+        "dream_action": "supersede",
+        "run_id": run_id,
+        "loser_row_id": str(loser_id),
+        "winner_row_id": str(winner_id),
+    })
+
+
+def _apply_archive(conn, prop, actor, run_id) -> None:
+    """Set ``expires_at`` to 30 days from now so the TTL cleanup
+    eventually removes the row. The row stays live until then so
+    existing retrievals don't break — it just stops surfacing in
+    active retrieval after expiry.
+    """
+    conn.execute(
+        """
+        update memory.typed_memory
+        set expires_at = now() + interval '30 days',
+            updated_at = now(),
+            metadata = metadata || jsonb_build_object('dream_archived_at', now(),
+                                                     'dream_run_id', %s::text)
+        where id = %s
+        """,
+        (run_id, prop["row_id"]),
+    )
+    _audit(conn, actor, prop["row_id"], "memory_updated", {
+        "dream_action": "archive",
+        "run_id": run_id,
+    })
+
+
+def _apply_flag(conn, prop, actor, run_id) -> None:
+    """Mark the row for human review by adding a metadata flag. The
+    next notify_review.py run will surface it in the Telegram digest.
+    """
+    conn.execute(
+        """
+        update memory.typed_memory
+        set metadata = metadata || jsonb_build_object('dream_flag',
+            jsonb_build_object('flagged_at', now(), 'run_id', %s::text,
+                              'rationale', %s::text))
+        where id = %s
+        """,
+        (run_id, prop["rationale"] or "", prop["row_id"]),
+    )
+    _audit(conn, actor, prop["row_id"], "memory_updated", {
+        "dream_action": "flag_for_review",
+        "run_id": run_id,
+        "rationale": prop["rationale"] or "",
+    })
+
+
+# ---------------------------------------------------------------------------
+# Status / introspection
+# ---------------------------------------------------------------------------
+
+
+def status(*, user_id: Optional[str] = None, database_url: str | None = None) -> dict:
+    """Return current store size, pending proposals count, last run info."""
+    with _connect(database_url) as conn:
+        store_count = conn.execute(
+            "select count(*) as n from memory.typed_memory where superseded_by is null"
+        ).fetchone()["n"]
+        superseded_count = conn.execute(
+            "select count(*) as n from memory.typed_memory where superseded_by is not null"
+        ).fetchone()["n"]
+        pending = pending_proposals_count(database_url=database_url)
+        last = latest_run(database_url=database_url)
+
+    return {
+        "store_size": store_count,
+        "superseded_count": superseded_count,
+        "pending_proposals": pending,
+        "last_run": last,
+    }
+
+
+def start_run(
+    *,
+    model: str,
+    instructions: str = "",
+    database_url: str | None = None,
+) -> str:
+    """
+    Insert a new ``memory.dream_runs`` row in ``in_progress`` status
+    and return its ``run_id``. Called at the start of every
+    ``dream.py run`` invocation.
+    """
+    run_id = str(uuid4())
+    with _connect(database_url) as conn:
+        conn.execute(
+            """
+            insert into memory.dream_runs
+                (run_id, started_at, model, instructions, status)
+            values (%s, now(), %s, %s, 'in_progress')
+            """,
+            (run_id, model, instructions or ""),
+        )
+        conn.commit()
+    return run_id
+
+
+def record_proposals(
+    run_id: str,
+    proposals: list[Proposal],
+    *,
+    summary: str = "",
+    rows_scanned: int = 0,
+    database_url: str | None = None,
+) -> int:
+    """
+    Insert a row in ``memory.dream_proposals`` for each :class:`Proposal`
+    in the synthesis result. Returns the count inserted.
+    """
+    if not proposals:
+        with _connect(database_url) as conn:
+            conn.execute(
+                """
+                update memory.dream_runs
+                set finished_at = now(),
+                    status = 'completed',
+                    rows_scanned = %s,
+                    proposals_count = 0,
+                    summary = %s
+                where run_id = %s
+                """,
+                (rows_scanned, summary or "", run_id),
+            )
+            conn.commit()
+        return 0
+
+    with _connect(database_url) as conn:
+        with conn.transaction():
+            for p in proposals:
+                conn.execute(
+                    """
+                    insert into memory.dream_proposals
+                        (run_id, row_id, action,
+                         proposed_replacement, proposed_superseded_by_id,
+                         confidence, rationale)
+                    values (%s, %s, %s, %s, %s, %s, %s)
+                    on conflict (run_id, row_id) do update
+                        set action = excluded.action,
+                            proposed_replacement = excluded.proposed_replacement,
+                            proposed_superseded_by_id = excluded.proposed_superseded_by_id,
+                            confidence = excluded.confidence,
+                            rationale = excluded.rationale
+                    """,
+                    (
+                        run_id, p.row_id, p.action,
+                        p.proposed_replacement, p.proposed_superseded_by_id,
+                        max(0.0, min(1.0, p.confidence)),
+                        p.rationale or "",
+                    ),
+                )
+            conn.execute(
+                """
+                update memory.dream_runs
+                set finished_at = now(),
+                    status = 'completed',
+                    rows_scanned = %s,
+                    proposals_count = %s,
+                    summary = %s
+                where run_id = %s
+                """,
+                (rows_scanned, len(proposals), summary or "", run_id),
+            )
+    return len(proposals)
+
+
+def fail_run(run_id: str, error_message: str, *, database_url: str | None = None) -> None:
+    """Mark a run as failed with the given error. Called when the
+    synthesis pass raises."""
+    with _connect(database_url) as conn:
+        conn.execute(
+            """
+            update memory.dream_runs
+            set finished_at = now(),
+                status = 'failed',
+                error_message = %s
+            where run_id = %s
+            """,
+            (error_message[:2000], run_id),
+        )
+        conn.commit()
+
+
+def pending_proposals_count(*, run_id: str | None = None, database_url: str | None = None) -> int:
+    """Number of proposals whose ``reviewer_action`` is null, optionally
+    filtered to a specific run. Defined alongside list_proposals to keep
+    query helpers co-located.
+    """
+    sql = "select count(*) as n from memory.dream_proposals where reviewer_action is null"
+    params: tuple = ()
+    if run_id is not None:
+        sql += " and run_id = %s"
+        params = (run_id,)
+    with _connect(database_url) as conn:
+        return int(conn.execute(sql, params).fetchone()["n"])
+
+
+def list_proposals(
+    run_id: str,
+    *,
+    include_reviewed: bool = False,
+    database_url: str | None = None,
+) -> list[dict]:
+    """Return all proposals for a run, optionally excluding already-reviewed ones."""
+    sql = """
+        select
+            p.id, p.run_id, p.row_id, p.action,
+            p.proposed_replacement, p.proposed_superseded_by_id,
+            p.confidence, p.rationale,
+            p.reviewer_action, p.reviewed_at, p.created_at,
+            m.memory_type, m.category, m.content, m.summary as row_summary
+        from memory.dream_proposals p
+        join memory.typed_memory m on m.id = p.row_id
+        where p.run_id = %s
+    """
+    if not include_reviewed:
+        sql += " and p.reviewer_action is null"
+    sql += " order by p.created_at"
+    with _connect(database_url) as conn:
+        return [dict(r) for r in conn.execute(sql, (run_id,)).fetchall()]
+
+
+if __name__ == "__main__":
+    import json
+    s = status()
+    print(json.dumps(s, indent=2, default=str))
