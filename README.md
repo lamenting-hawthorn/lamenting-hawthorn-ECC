@@ -158,7 +158,7 @@ read their configuration from environment variables.
 sequenceDiagram
     autonumber
     actor User
-    participant Adapter as Adapter / channel
+    participant Adapter as Adapter channel
     participant Identity as Identity resolver
     participant Graph as LangGraph runtime
     participant Retrieval as Hybrid retrieval
@@ -166,13 +166,14 @@ sequenceDiagram
     participant Model as LLM
     participant Trace as Trace recorder
     participant SkillLoop as SkillLoop sidecar
+    participant Connector as Approved-memory connector
 
     User->>Adapter: send message
-    Adapter->>Identity: normalize channel + actor
+    Adapter->>Identity: normalize channel and actor
     Identity-->>Adapter: actor_id, org_id, visibility scope
-    Adapter->>Graph: invoke(input, scoped identity)
-    Graph->>Retrieval: request context for current actor/session
-    Retrieval->>Store: FTS + vector + graph expansion
+    Adapter->>Graph: invoke with scoped identity
+    Graph->>Retrieval: request context for actor and session
+    Retrieval->>Store: FTS, vector, and graph lookups
     Store-->>Retrieval: permission-filtered ranked context
     Retrieval-->>Graph: compact context bundle
     Graph->>Model: prompt with retrieved context
@@ -180,13 +181,13 @@ sequenceDiagram
     Graph-->>Adapter: final response
     Adapter-->>User: reply
 
-    par durable side effects
+    par non-blocking durable side effects
         Graph->>Store: salient memory write if gate passes
-        Graph->>Trace: trace events + diagnostics
+        Graph->>Trace: trace events and diagnostics
         Trace-->>SkillLoop: exported traces for offline governance
+        SkillLoop-->>Connector: approved markdown proposals
+        Connector-->>Store: idempotent typed-memory import
     end
-
-    Note over SkillLoop,Store: SkillLoop proposes changes offline; only approved markdown is imported by the connector.
 ```
 
 ## Repository Layout
