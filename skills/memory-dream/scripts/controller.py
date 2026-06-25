@@ -129,11 +129,10 @@ def latest_run(
     that want to filter by status (e.g. "most recent completed run").
 
     When ``user_id`` is provided, the lookup is restricted to runs
-    whose ``instructions`` (a free-text field populated from
-    ``--focus`` / ``$DREAM_INSTRUCTIONS``) is the empty string —
-    dream_runs does not currently carry a user_id column. If you need
-    strict user-scoping, add a user_id column to ``memory.dream_runs``
-    and update this query accordingly.
+    with that user_id. If the database has no matching rows, this
+    function returns ``None`` rather than returning a misattributed
+    run from another actor. The ``status_filter`` argument is
+    unchanged from before.
     """
     with _connect(database_url) as conn:
         params: list = []
@@ -142,12 +141,11 @@ def latest_run(
             clauses.append("status = %s")
             params.append(status_filter)
         if user_id is not None:
-            # No user_id column on dream_runs; require no instructions
-            # so admin/system runs are excluded for ordinary users.
-            clauses.append("instructions = ''")
+            clauses.append("user_id = %s")
+            params.append(user_id)
         where = (" where " + " and ".join(clauses)) if clauses else ""
         row = conn.execute(
-            f"select * from memory.dream_runs{where} "
+            f"select * from memory.dream_runs{where} "  # noqa: S608
             f"order by started_at desc limit 1",
             params,
         ).fetchone()
@@ -295,51 +293,48 @@ def adopt_run(
             errors: list[str] = []
 
             for prop in proposals:
-                try:
-                    confidence = float(prop["confidence"])
-                    if confidence < min_confidence:
-                        skipped += 1
-                        _mark_proposal(conn, prop["id"], "rejected",
-                                       rationale_extra=f"skipped: confidence {confidence:.2f} < {min_confidence}")
-                        continue
-
-                    action = prop["action"]
-
-                    if action == "keep":
-                        _mark_proposal(conn, prop["id"], "adopted")
-                        _audit(conn, actor, prop["row_id"], "memory_read",
-                               {"dream_action": "keep", "run_id": run_id})
-                        adopted += 1
-
-                    elif action == "merge":
-                        _apply_merge(conn, prop, actor, run_id)
-                        _mark_proposal(conn, prop["id"], "adopted")
-                        adopted += 1
-
-                    elif action == "supersede":
-                        _apply_supersede(conn, prop, actor, run_id)
-                        _mark_proposal(conn, prop["id"], "adopted")
-                        adopted += 1
-
-                    elif action == "archive":
-                        _apply_archive(conn, prop, actor, run_id)
-                        _mark_proposal(conn, prop["id"], "adopted")
-                        adopted += 1
-
-                    elif action == "flag_for_review":
-                        _apply_flag(conn, prop, actor, run_id)
-                        _mark_proposal(conn, prop["id"], "adopted")
-                        adopted += 1
-
-                    else:
-                        # Unknown action — treat as skip.
-                        skipped += 1
-                        _mark_proposal(conn, prop["id"], "rejected",
-                                       rationale_extra=f"unknown action: {action}")
-                except Exception as exc:
-                    errors.append(f"proposal {prop['id']}: {exc}")
+                confidence = float(prop["confidence"])
+                if confidence < min_confidence:
+                    skipped += 1
+                    rejected += 1
                     _mark_proposal(conn, prop["id"], "rejected",
-                                   rationale_extra=f"error during apply: {exc}")
+                                   rationale_extra=f"skipped: confidence {confidence:.2f} < {min_confidence}")
+                    continue
+
+                action = prop["action"]
+
+                if action == "keep":
+                    _mark_proposal(conn, prop["id"], "adopted")
+                    _audit(conn, actor, prop["row_id"], "memory_read",
+                           {"dream_action": "keep", "run_id": run_id})
+                    adopted += 1
+
+                elif action == "merge":
+                    _apply_merge(conn, prop, actor, run_id)
+                    _mark_proposal(conn, prop["id"], "adopted")
+                    adopted += 1
+
+                elif action == "supersede":
+                    _apply_supersede(conn, prop, actor, run_id)
+                    _mark_proposal(conn, prop["id"], "adopted")
+                    adopted += 1
+
+                elif action == "archive":
+                    _apply_archive(conn, prop, actor, run_id)
+                    _mark_proposal(conn, prop["id"], "adopted")
+                    adopted += 1
+
+                elif action == "flag_for_review":
+                    _apply_flag(conn, prop, actor, run_id)
+                    _mark_proposal(conn, prop["id"], "adopted")
+                    adopted += 1
+
+                else:
+                    # Unknown action — mark rejected.
+                    skipped += 1
+                    rejected += 1
+                    _mark_proposal(conn, prop["id"], "rejected",
+                                   rationale_extra=f"unknown action: {action}")
 
             # Update run counters.
             conn.execute(
@@ -567,7 +562,11 @@ def status(*, user_id: str | None = None, database_url: str | None = None) -> di
     """Return current store size, pending proposals count, last run info.
 
     All counts are scoped to ``user_id`` when provided so a multi-actor
-    store doesn't leak cross-user operational metadata.
+    store doesn't leak cross-user operational metadata. When
+    ``user_id`` is set, ``last_run`` is filtered by the persisted
+    ``user_id`` column on ``memory.dream_runs``; if no user-scoped
+    run exists, ``last_run`` is omitted rather than returning a
+    misattributed row from another actor.
     """
     with _connect(database_url) as conn:
         if user_id is not None:
@@ -603,22 +602,24 @@ def start_run(
     *,
     model: str,
     instructions: str = "",
+    user_id: str | None = None,
     database_url: str | None = None,
 ) -> str:
     """
     Insert a new ``memory.dream_runs`` row in ``in_progress`` status
     and return its ``run_id``. Called at the start of every
-    ``dream.py run`` invocation.
+    ``dream.py run`` invocation. The optional ``user_id`` is recorded
+    so status / latest_run queries can be scoped per actor.
     """
     run_id = str(uuid4())
     with _connect(database_url) as conn:
         conn.execute(
             """
             insert into memory.dream_runs
-                (run_id, started_at, model, instructions, status)
-            values (%s, now(), %s, %s, 'in_progress')
+                (run_id, user_id, started_at, model, instructions, status)
+            values (%s, %s, now(), %s, %s, 'in_progress')
             """,
-            (run_id, model, instructions or ""),
+            (run_id, user_id, model, instructions or ""),
         )
         conn.commit()
     return run_id

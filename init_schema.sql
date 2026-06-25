@@ -241,6 +241,7 @@ create table memory.diagnostic_reports (
 
 create table memory.dream_runs (
     run_id              uuid not null default gen_random_uuid(),
+    user_id             text,  -- nullable: legacy/admin runs may not have one
     started_at          timestamptz not null default now(),
     finished_at         timestamptz,
     model               text,
@@ -258,6 +259,7 @@ create table memory.dream_runs (
 );
 
 create index idx_dream_runs_status on memory.dream_runs (status, started_at desc);
+create index idx_dream_runs_user on memory.dream_runs (user_id, started_at desc);
 
 -- =================================================================
 -- 2j. DREAM PROPOSALS (batch memory curation staging)

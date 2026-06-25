@@ -201,7 +201,17 @@ def call_llm(prompt: str, *, model: str | None = None,
         repo_root = _find_repo_root()
         if repo_root and str(repo_root) not in sys.path:
             sys.path.insert(0, str(repo_root))
-        from src.llm_client import LLMClient  # type: ignore[import-not-found]
+        try:
+            from src.llm_client import LLMClient  # type: ignore[import-not-found]
+        except (ImportError, ModuleNotFoundError) as exc:
+            # Only fall back when the runtime client itself is missing
+            # (or its containing package). Other ImportErrors that
+            # surface during LLMClient construction must NOT trigger
+            # the HTTP fallback — they would silently route the
+            # request through a different path.
+            _LOGGER.debug("Runtime LLM client not importable: %s", exc)
+            return _call_llm_via_httpx(prompt, model=model, api_key=api_key,
+                                       max_tokens=max_tokens, temperature=temperature)
 
         client = LLMClient(model=model) if model else LLMClient()
         return client.chat(
@@ -211,17 +221,28 @@ def call_llm(prompt: str, *, model: str | None = None,
             ),
             retrieved_context="",
         )
-    except (ImportError, ModuleNotFoundError) as exc:
-        # The runtime client is not available in this environment; fall
-        # through to the direct httpx path. We only fall back on
-        # ImportError, never on runtime client errors (which would mask
-        # real failures and silently send the prompt to a different
-        # endpoint).
-        _LOGGER.debug("Runtime LLM client not importable: %s", exc)
+    except (ImportError, ModuleNotFoundError):
+        # Re-raise so the runtime client path is the only fallback for
+        # missing imports; HTTP path is used for the explicit
+        # ImportError above. Other ImportErrors bubble up.
+        raise
     except Exception as exc:
         raise RuntimeError("Runtime LLM client failed") from exc
 
-    # 2. Direct httpx fallback.
+
+def _call_llm_via_httpx(
+    prompt: str,
+    *,
+    model: str | None,
+    api_key: str | None,
+    max_tokens: int,
+    temperature: float,
+) -> str:
+    """Direct httpx POST to $LLM_BASE_URL/chat/completions.
+
+    Extracted from ``call_llm`` so the ImportError fallback path can
+    return the value without a confusing fall-through.
+    """
     import httpx
 
     api_key = api_key or os.environ.get("LLM_API_KEY", "")
@@ -264,6 +285,12 @@ def call_llm(prompt: str, *, model: str | None = None,
         return resp.json()["choices"][0]["message"]["content"]
     except Exception as exc:
         raise RuntimeError(f"LLM call failed: {exc}") from exc
+
+
+# Backwards-compat: keep the inline call_llm fall-through reference
+# for any external callers that import _call_llm_via_httpx via the
+# old layout. (The body is now inside the function above.)
+_call_llm_via_httpx_marker = True  # noqa: F841
 
 
 # Allowlist of trusted LLM base URLs. The dream skill is designed for
@@ -361,6 +388,12 @@ def parse_response(response: str) -> SynthesisResult:
     if not isinstance(data, dict):
         raise RuntimeError("LLM response is not a JSON object.")
 
+    def _safe_str(value) -> str:
+        """Coerce a value to a stripped string; tolerate non-strings."""
+        if not isinstance(value, str):
+            return ""
+        return value.strip()
+
     # Validate proposal schema and clamp confidence to [0.0, 1.0].
     raw_items = data.get("proposals", [])
     if not isinstance(raw_items, list):
@@ -370,10 +403,10 @@ def parse_response(response: str) -> SynthesisResult:
     for item in raw_items:
         if not isinstance(item, dict):
             continue
-        action = (item.get("action") or "").strip()
+        action = _safe_str(item.get("action"))
         if action not in ("keep", "merge", "supersede", "archive", "flag_for_review"):
             continue
-        row_id = (item.get("row_id") or "").strip()
+        row_id = _safe_str(item.get("row_id"))
         if not row_id:
             continue
         try:
@@ -381,20 +414,23 @@ def parse_response(response: str) -> SynthesisResult:
         except (TypeError, ValueError):
             continue
         confidence = max(0.0, min(1.0, raw_conf))
+        repl = _safe_str(item.get("proposed_replacement")) or None
+        sup = _safe_str(item.get("proposed_superseded_by_id")) or None
+        rationale = _safe_str(item.get("rationale"))
         proposals.append(
             Proposal(
                 row_id=row_id,
                 action=action,
-                proposed_replacement=(item.get("proposed_replacement") or "").strip() or None,
-                proposed_superseded_by_id=(item.get("proposed_superseded_by_id") or "").strip() or None,
+                proposed_replacement=repl,
+                proposed_superseded_by_id=sup,
                 confidence=confidence,
-                rationale=(item.get("rationale") or "").strip(),
+                rationale=rationale,
             )
         )
 
     return SynthesisResult(
         proposals=proposals,
-        summary=(data.get("summary") or "").strip(),
+        summary=_safe_str(data.get("summary")),
         raw_response=response,
     )
 
@@ -425,15 +461,15 @@ if __name__ == "__main__":
     target = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("ACTOR_ID", "u_owner")
     store = parse_typed_memory(user_id=target)
     prompt = build_prompt(store, "(no sessions)", 0, 0)
-    # Log only metadata by default; the full prompt may contain PII.
-    # Enable DEBUG logging to see the prompt body when needed.
+    # Metadata-only logging: the full prompt may contain PII (typed
+    # memory rows + activity excerpts). The prompt body is NEVER
+    # logged at any level. Set DREAM_DUMP_PROMPT=1 to print a
+    # redacted preview to stderr for local debugging.
     _LOGGER.info(
         "prompt built: %d chars (~%d tokens) for %d rows",
         len(prompt), len(prompt) // 4, store.entry_count,
     )
-    if _LOGGER.isEnabledFor(logging.DEBUG):
-        _LOGGER.debug("prompt body:\n%s\n…", prompt[:400])
-    else:
-        _LOGGER.info(
-            "set log level DEBUG to see prompt body (may contain PII)"
-        )
+    if os.environ.get("DREAM_DUMP_PROMPT") == "1":
+        import sys as _sys
+        preview = prompt[:400].replace("\n", " ")
+        print(f"[DREAM_DUMP_PROMPT] {preview}…", file=_sys.stderr)

@@ -70,10 +70,16 @@ def find_exact_dupes(entries: list[MemoryEntry]) -> list[DuplicateGroup]:
     result: list[DuplicateGroup] = []
     for h, members in groups.items():
         if len(members) > 1:
-            # Canonical = the most recent (highest index) entry.
-            canonical = max(members, key=lambda x: x.index)
+            # Canonical = the parser-preferred (lowest index) entry.
+            # ``parse_typed_memory`` assigns smaller indexes to
+            # higher-priority rows (episodic first, then semantic by
+            # confidence desc). The canonical is placed first in
+            # ``members`` so downstream consumers see a consistent
+            # ordering.
+            canonical = min(members, key=lambda x: x.index)
+            ordered = sorted(members, key=lambda x: x.index)
             result.append(
-                DuplicateGroup(canonical=canonical, members=members, reason="exact")
+                DuplicateGroup(canonical=canonical, members=ordered, reason="exact")
             )
     return result
 
@@ -92,6 +98,8 @@ def find_substring_dupes(
     result: list[DuplicateGroup] = []
     consumed: set[int] = set()
 
+    # Iterate by text length (longest first) for substring containment,
+    # but pick the canonical by parser-preferred index (lowest).
     sorted_entries = sorted(entries, key=lambda e: -len(e.text))
 
     for i, outer in enumerate(sorted_entries):
@@ -110,10 +118,21 @@ def find_substring_dupes(
             for inner in inners:
                 consumed.add(id(inner))
             consumed.add(id(outer))
+            # Canonical = parser-preferred (lowest index). Recency
+            # tiebreak uses confidence desc; if equal, lower index wins.
+            group_members = [outer] + inners
+            canonical = min(
+                group_members,
+                key=lambda e: (e.index, -float(e.confidence or 0.0)),
+            )
+            ordered = sorted(
+                group_members,
+                key=lambda e: (e.index, -float(e.confidence or 0.0)),
+            )
             result.append(
                 DuplicateGroup(
-                    canonical=outer,
-                    members=[outer] + inners,
+                    canonical=canonical,
+                    members=ordered,
                     reason="substring",
                 )
             )
@@ -151,10 +170,20 @@ def find_common_prefix_dupes(
                 consumed.add(id(b))
         if len(cluster) > 1:
             consumed.add(id(a))
+            # Canonical = parser-preferred (lowest index); recency
+            # tiebreak uses confidence desc.
+            canonical = min(
+                cluster,
+                key=lambda e: (e.index, -float(e.confidence or 0.0)),
+            )
+            ordered = sorted(
+                cluster,
+                key=lambda e: (e.index, -float(e.confidence or 0.0)),
+            )
             result.append(
                 DuplicateGroup(
-                    canonical=max(cluster, key=lambda e: e.index),
-                    members=cluster,
+                    canonical=canonical,
+                    members=ordered,
                     reason="prefix",
                 )
             )
@@ -250,12 +279,20 @@ def find_semantic_dupes(
                 )
                 if other is None:
                     continue
-                # Canonical = higher confidence; tiebreak by recency.
-                canonical = entry if entry.confidence >= other.confidence else other
+                # Canonical = parser-preferred (lowest index);
+                # tiebreak by confidence desc.
+                canonical = min(
+                    [entry, other],
+                    key=lambda e: (e.index, -float(e.confidence or 0.0)),
+                )
+                members = sorted(
+                    [entry, other],
+                    key=lambda e: (e.index, -float(e.confidence or 0.0)),
+                )
                 groups.append(
                     DuplicateGroup(
                         canonical=canonical,
-                        members=[canonical, other] if canonical is entry else [entry, canonical],
+                        members=members,
                         reason="semantic",
                         similarity=sim,
                     )

@@ -94,6 +94,7 @@ class TestImports(unittest.TestCase):
         import importlib.util
         spec = importlib.util.spec_from_file_location("dream", DREAM_DIR / "dream.py")
         self.assertIsNotNone(spec)
+        self.assertIsNotNone(getattr(spec, "loader", None))
         assert spec is not None and spec.loader is not None
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
@@ -343,11 +344,106 @@ class TestSchemaAdditions(unittest.TestCase):
         self.assertGreater(runs_idx, 0)
         self.assertGreater(props_idx, runs_idx,
                           "dream_runs must be declared before dream_proposals")
+        # dream_runs must carry a user_id column for proper user-scoping.
+        # The previous `instructions = ''` filter was incorrect because
+        # another actor's run could match. See PR #2359 finding 9.
+        self.assertRegex(
+            self.text,
+            r"create table memory\.dream_runs[\s\S]+?\buser_id\b",
+        )
 
     def test_indexes(self):
         # At least one dream-specific index.
         self.assertIn("idx_dream_proposals", self.text)
         self.assertIn("idx_dream_runs", self.text)
+        # The dream_runs.user_id index for per-actor status queries.
+        self.assertIn("idx_dream_runs_user", self.text)
+
+
+class TestParserSQL(unittest.TestCase):
+    """Verify the parser SQL starts with `select` (not lint comments)."""
+
+    def test_sql_does_not_contain_noqa(self):
+        # Re-import the module and patch _connect to capture the SQL
+        # before executing it. The lint comment must NOT be embedded
+        # inside the query text.
+        import sys
+        captured: dict = {}
+
+        class _FakeConn:
+            def execute(self, sql, params):
+                captured["sql"] = sql
+                captured["params"] = params
+                class _R:
+                    def fetchall(self): return []
+                return _R()
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        # Force reimport in case a prior test imported parser.
+        sys.modules.pop("parser", None)
+        sys.path.insert(0, str(DREAM_DIR))
+        import parser
+        parser._connect = lambda *a, **kw: _FakeConn()
+        parser.parse_typed_memory(user_id="u_test", database_url="x")
+        sql = captured.get("sql", "")
+        self.assertTrue(
+            sql.lstrip().startswith("select"),
+            f"SQL must start with 'select' (got {sql[:40]!r})",
+        )
+        self.assertNotIn("noqa", sql,
+                         "lint comment must not be inside SQL text")
+
+
+class TestLoadEnv(unittest.TestCase):
+    """Verify _loadenv exports the key back to LLM_API_KEY."""
+
+    def test_existing_env_exports_to_llm_api_key(self):
+        import importlib
+
+        import _loadenv
+        # Reload to reset module state.
+        importlib.reload(_loadenv)
+        import os
+        old = os.environ.get("LLM_API_KEY")
+        os.environ["LLM_API_KEY"] = ""
+        os.environ["OPENAI_API_KEY"] = "sk-test-existing-env-1234"
+        try:
+            value = _loadenv.load_api_key()
+            self.assertEqual(value, "sk-test-existing-env-1234")
+            self.assertEqual(os.environ["LLM_API_KEY"], "sk-test-existing-env-1234")
+        finally:
+            if old is not None:
+                os.environ["LLM_API_KEY"] = old
+            else:
+                os.environ.pop("LLM_API_KEY", None)
+            os.environ.pop("OPENAI_API_KEY", None)
+
+
+class TestCollectorValidation(unittest.TestCase):
+    """Verify collect_activity rejects bad parameters."""
+
+    def test_negative_max_age_days(self):
+        import collector
+        with self.assertRaises(ValueError):
+            collector.collect_activity("u_test", max_age_days=-1)
+
+    def test_zero_max_sessions(self):
+        import collector
+        with self.assertRaises(ValueError):
+            collector.collect_activity("u_test", max_sessions=0)
+
+    def test_min_exceeds_max(self):
+        import collector
+        with self.assertRaises(ValueError):
+            collector.collect_activity(
+                "u_test", min_session_chars=1000, max_total_chars=500,
+            )
+
+    def test_empty_user_id(self):
+        import collector
+        with self.assertRaises(ValueError):
+            collector.collect_activity("")
 
 
 if __name__ == "__main__":
