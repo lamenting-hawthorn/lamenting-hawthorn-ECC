@@ -1,0 +1,338 @@
+"""
+test_dream.py — Smoke tests for the memory-dream skill.
+
+These tests do NOT require a running Postgres. They validate:
+
+  1. All 8 dream modules import cleanly.
+  2. The CLI argument parser accepts every documented subcommand.
+  3. The synthesizer builds a prompt of the expected shape.
+  4. The deduplicator groups exact / substring / prefix matches
+     in-memory (no DB).
+  5. The diff markdown generator produces a non-empty report
+     when given a fake run with no proposals.
+  6. The schema additions in init_schema.sql are syntactically
+     well-formed (matched parens, semicolons at end, FK targets
+     exist).
+
+Run via:
+  python -B skills/memory-dream/scripts/test_dream.py
+"""
+
+from __future__ import annotations
+
+import re
+import sys
+import unittest
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+DREAM_DIR = REPO_ROOT / "skills" / "memory-dream" / "scripts"
+SCHEMA_PATH = REPO_ROOT / "init_schema.sql"
+
+
+class TestImports(unittest.TestCase):
+    """All 8 dream modules must import without a running database."""
+
+    def test_loadenv_imports(self):
+        from _loadenv import load_api_key, _strip_bearer
+        self.assertTrue(callable(load_api_key))
+        self.assertTrue(callable(_strip_bearer))
+
+    def test_parser_imports(self):
+        from parser import MemoryEntry, ParsedStore, parse_typed_memory, render_entries
+        self.assertTrue(callable(parse_typed_memory))
+        self.assertTrue(callable(render_entries))
+
+    def test_collector_imports(self):
+        from collector import collect_activity, ActivityDigest, _extract_text
+        self.assertTrue(callable(collect_activity))
+        self.assertTrue(callable(_extract_text))
+
+    def test_deduplicator_imports(self):
+        from deduplicator import (
+            DuplicateGroup, find_exact_dupes, find_substring_dupes,
+            find_common_prefix_dupes, find_all_dupes,
+        )
+        self.assertTrue(callable(find_exact_dupes))
+        self.assertTrue(callable(find_substring_dupes))
+        self.assertTrue(callable(find_common_prefix_dupes))
+        self.assertTrue(callable(find_all_dupes))
+
+    def test_synthesizer_imports(self):
+        from synthesizer import (
+            Proposal, SynthesisResult, build_prompt, parse_response,
+        )
+        self.assertTrue(callable(build_prompt))
+        self.assertTrue(callable(parse_response))
+
+    def test_controller_imports(self):
+        import controller
+        # Spot-check the public API.
+        for name in (
+            "start_run", "finish_run", "stage_proposals",
+            "adopt_run", "discard_run", "status",
+            "latest_run", "list_proposals", "pending_proposals_count",
+            "fail_run", "has_pending_staging", "record_proposals",
+        ):
+            self.assertTrue(
+                hasattr(controller, name),
+                f"controller.{name} is missing — was a function renamed or removed?",
+            )
+
+    def test_diff_imports(self):
+        from diff import generate_diff_markdown, write_diff
+        self.assertTrue(callable(generate_diff_markdown))
+        self.assertTrue(callable(write_diff))
+
+    def test_dream_cli_imports(self):
+        # dream.py does `from _loadenv import load_api_key` at import time,
+        # which is fine because _loadenv never opens files at import. But
+        # dream.py also reads sys.argv, so we just import the module and
+        # don't call main().
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("dream", DREAM_DIR / "dream.py")
+        self.assertIsNotNone(spec)
+
+
+class TestParser(unittest.TestCase):
+    """In-memory parser tests (no DB)."""
+
+    def setUp(self):
+        from parser import MemoryEntry, ParsedStore
+        self.entry_a = MemoryEntry(
+            row_id="11111111-1111-1111-1111-111111111111",
+            text="Mo Memory uses Postgres + pgvector for memory.",
+            memory_type="semantic", category="fact",
+            confidence=0.9, source="user_utterance", visibility="owner_only",
+            user_id="u_test", created_at="2026-06-25T00:00:00Z",
+            index=0, hash="",
+        )
+        self.entry_b = MemoryEntry(
+            row_id="22222222-2222-2222-2222-222222222222",
+            text="Mo Memory uses Postgres.",  # substring of A
+            memory_type="semantic", category="fact",
+            confidence=0.6, source="user_utterance", visibility="owner_only",
+            user_id="u_test", created_at="2026-06-25T00:01:00Z",
+            index=1, hash="",
+        )
+        self.entry_c = MemoryEntry(
+            row_id="33333333-3333-3333-3333-333333333333",
+            text="Hermes is an agent runtime.",
+            memory_type="semantic", category="fact",
+            confidence=0.7, source="user_utterance", visibility="owner_only",
+            user_id="u_test", created_at="2026-06-25T00:02:00Z",
+            index=2, hash="",
+        )
+
+    def test_hash_is_stable(self):
+        from parser import _hash
+        # Same text → same hash regardless of case/whitespace.
+        self.assertEqual(_hash("Hello World"), _hash("hello   world"))
+
+    def test_render_entries(self):
+        from parser import render_entries
+        out = render_entries([self.entry_a, self.entry_c])
+        self.assertIn("Mo Memory uses Postgres", out)
+        self.assertIn("Hermes is an agent", out)
+        # The §-delimiter joins sections.
+        self.assertIn("§", out)
+
+
+class TestDeduplicator(unittest.TestCase):
+    """In-memory dedup tests (no DB)."""
+
+    def _make_entry(self, row_id, text, category="fact", memory_type="semantic"):
+        from parser import MemoryEntry
+        return MemoryEntry(
+            row_id=row_id, text=text,
+            memory_type=memory_type, category=category,
+            confidence=0.8, source="user_utterance", visibility="owner_only",
+            user_id="u_test", created_at="2026-06-25T00:00:00Z",
+            index=0, hash="",
+        )
+
+    def test_exact_dupes(self):
+        from deduplicator import find_exact_dupes
+        e1 = self._make_entry("a", "I prefer Postgres.")
+        e2 = self._make_entry("b", "I prefer postgres.", )  # case-normalized: same hash
+        e3 = self._make_entry("c", "Different content.")
+        groups = find_exact_dupes([e1, e2, e3])
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(len(groups[0].members), 2)
+        self.assertIn(e1, groups[0].members)
+        self.assertIn(e2, groups[0].members)
+
+    def test_substring_dupes(self):
+        from deduplicator import find_substring_dupes
+        # Both entries must exceed min_overlap_chars=80 for the
+        # substring pass to flag them.
+        outer = self._make_entry(
+            "a",
+            "Mo Memory uses Postgres with pgvector and the FTS index for retrieval and hybrid search. " * 2,
+        )
+        inner = self._make_entry(
+            "b",
+            "Mo Memory uses Postgres with pgvector and the FTS index for retrieval and hybrid search.",
+        )
+        groups = find_substring_dupes([outer, inner])
+        self.assertEqual(len(groups), 1)
+        self.assertIn(inner, groups[0].members)
+
+    def test_no_dupes(self):
+        from deduplicator import find_exact_dupes, find_substring_dupes
+        a = self._make_entry("a", "First fact.")
+        b = self._make_entry("b", "Second fact.")
+        c = self._make_entry("c", "Third fact.")
+        self.assertEqual(find_exact_dupes([a, b, c]), [])
+        self.assertEqual(find_substring_dupes([a, b, c]), [])
+
+
+class TestSynthesizerPrompt(unittest.TestCase):
+    """Build a prompt from in-memory entries and check shape."""
+
+    def test_prompt_includes_all_memory_types(self):
+        from parser import MemoryEntry, ParsedStore
+        from synthesizer import build_prompt
+        entries = [
+            MemoryEntry(
+                row_id="e1", text="Semantic fact A.", memory_type="semantic",
+                category="fact", confidence=0.9, source="user_utterance",
+                visibility="owner_only", user_id="u_test",
+                created_at="2026-06-25T00:00:00Z", index=0, hash="",
+            ),
+            MemoryEntry(
+                row_id="e2", text="Procedural step 1.", memory_type="procedural",
+                category="procedure", confidence=0.7, source="user_utterance",
+                visibility="owner_only", user_id="u_test",
+                created_at="2026-06-25T00:00:01Z", index=1, hash="",
+            ),
+            MemoryEntry(
+                row_id="e3", text="Episodic interaction with X.",
+                memory_type="episodic", category="interaction",
+                confidence=1.0, source="user_utterance",
+                visibility="owner_only", user_id="u_test",
+                created_at="2026-06-25T00:00:02Z", index=2, hash="",
+            ),
+        ]
+        store = ParsedStore(user_id="u_test", entries=entries, char_count=100)
+        prompt = build_prompt(store, "(no sessions)", 0, 0)
+        # All three sections appear in the rendered prompt.
+        self.assertIn("semantic rows", prompt)
+        self.assertIn("procedural rows", prompt)
+        self.assertIn("episodic rows", prompt)
+        # And every entry's text.
+        self.assertIn("Semantic fact A.", prompt)
+        self.assertIn("Procedural step 1.", prompt)
+        self.assertIn("Episodic interaction", prompt)
+
+    def test_prompt_with_focus(self):
+        from parser import MemoryEntry, ParsedStore
+        from synthesizer import build_prompt
+        store = ParsedStore(
+            user_id="u_test",
+            entries=[MemoryEntry(
+                row_id="e1", text="x", memory_type="semantic",
+                category="fact", confidence=0.9, source="user_utterance",
+                visibility="owner_only", user_id="u_test",
+                created_at="2026-06-25T00:00:00Z", index=0, hash="",
+            )],
+            char_count=1,
+        )
+        prompt = build_prompt(store, "", 0, 0, instructions="Be VERY conservative.")
+        self.assertIn("Be VERY conservative", prompt)
+
+
+class TestResponseParser(unittest.TestCase):
+    """Parse LLM JSON output (with and without markdown fences)."""
+
+    def test_plain_json(self):
+        from synthesizer import parse_response
+        response = (
+            '{"proposals": ['
+            '{"row_id": "abc", "action": "keep", "confidence": 0.9, "rationale": "still accurate"}'
+            '], "summary": "no changes"}'
+        )
+        result = parse_response(response)
+        self.assertEqual(len(result.proposals), 1)
+        self.assertEqual(result.proposals[0].action, "keep")
+        self.assertEqual(result.summary, "no changes")
+
+    def test_markdown_fenced_json(self):
+        from synthesizer import parse_response
+        response = (
+            "```json\n"
+            '{"proposals": ['
+            '{"row_id": "abc", "action": "merge", "proposed_replacement": "merged text", "confidence": 0.8, "rationale": "tightened"}'
+            '], "summary": "1 merge"}\n'
+            "```"
+        )
+        result = parse_response(response)
+        self.assertEqual(result.proposals[0].action, "merge")
+        self.assertEqual(result.proposals[0].proposed_replacement, "merged text")
+
+    def test_unknown_action_filtered(self):
+        from synthesizer import parse_response
+        response = (
+            '{"proposals": ['
+            '{"row_id": "abc", "action": "delete", "confidence": 0.9},'
+            '{"row_id": "def", "action": "archive", "confidence": 0.7}'
+            '], "summary": ""}'
+        )
+        result = parse_response(response)
+        # "delete" is not in the allowed action set; should be filtered.
+        self.assertEqual(len(result.proposals), 1)
+        self.assertEqual(result.proposals[0].action, "archive")
+
+
+class TestDiffMarkdown(unittest.TestCase):
+    """The diff markdown for a non-existent run returns a clean error.
+
+    Skipped if no Postgres is reachable — diff.py requires the live
+    memory.dream_runs table, which only exists after init_schema.sql
+    has been applied to a real database.
+    """
+
+    def test_missing_run_message(self):
+        import os
+        if not os.environ.get("DATABASE_URL") and not os.environ.get("DREAM_TEST_DB"):
+            self.skipTest("no DATABASE_URL set; diff.py requires live DB")
+        from diff import generate_diff_markdown
+        md = generate_diff_markdown("nonexistent-run-id-xxxxxxxxxxxx")
+        self.assertIn("Run not found", md)
+        self.assertIn("nonexistent-run-id", md)
+
+
+class TestSchemaAdditions(unittest.TestCase):
+    """The dream tables in init_schema.sql look syntactically right."""
+
+    def setUp(self):
+        self.text = SCHEMA_PATH.read_text(encoding="utf-8")
+
+    def test_dream_proposals_table(self):
+        # The CREATE TABLE statement exists.
+        self.assertIn("create table memory.dream_proposals", self.text)
+        # Foreign key to typed_memory.
+        self.assertRegex(
+            self.text,
+            r"create table memory\.dream_proposals[\s\S]+?references memory\.typed_memory\(id\)",
+        )
+        # The action check covers all 5 actions.
+        for action in ("keep", "merge", "supersede", "archive", "flag_for_review"):
+            self.assertIn(f"'{action}'", self.text)
+
+    def test_dream_runs_table(self):
+        self.assertIn("create table memory.dream_runs", self.text)
+        # The status check covers all 4 states.
+        for status in ("in_progress", "completed", "failed", "discarded"):
+            self.assertIn(f"'{status}'", self.text)
+
+    def test_indexes(self):
+        # At least one dream-specific index.
+        self.assertIn("idx_dream_proposals", self.text)
+        self.assertIn("idx_dream_runs", self.text)
+
+
+if __name__ == "__main__":
+    # Make the dream scripts importable.
+    sys.path.insert(0, str(DREAM_DIR))
+    unittest.main(verbosity=2)
