@@ -296,11 +296,15 @@ def adopt_run(
                 confidence = float(prop["confidence"])
                 if confidence < min_confidence:
                     # Skipped (low confidence) — not adopted. The
-                    # proposal row is marked rejected in the DB for
-                    # audit, but the run-level counter increments
-                    # only ``skipped`` to avoid double-counting (see
-                    # Greptile P1 review comment).
+                    # proposal row is marked rejected in storage
+                    # for audit, so the run-level ``rejected``
+                    # counter must also increment (otherwise
+                    # ``rejected_count`` would underreport the
+                    # actual number of rejected proposal rows).
+                    # ``skipped`` tracks the subset that did not
+                    # execute an apply helper.
                     skipped += 1
+                    rejected += 1
                     _mark_proposal(conn, prop["id"], "rejected",
                                    rationale_extra=f"skipped: confidence {confidence:.2f} < {min_confidence}")
                     continue
@@ -334,11 +338,12 @@ def adopt_run(
                     adopted += 1
 
                 else:
-                    # Unknown action — skipped (not adopted). Same
-                    # counter logic as the low-confidence branch: mark
-                    # the proposal row rejected for audit but only
-                    # increment ``skipped`` at the run level.
+                    # Unknown action — same accounting as the
+                    # low-confidence branch: the proposal row is
+                    # rejected in storage, so both ``skipped`` and
+                    # ``rejected`` increment.
                     skipped += 1
+                    rejected += 1
                     _mark_proposal(conn, prop["id"], "rejected",
                                    rationale_extra=f"unknown action: {action}")
 
