@@ -153,6 +153,7 @@ def collect_activity(
             return []
 
         session_ids = [r["session_id"] for r in session_rows][:max_sessions]
+        session_last_at = {r["session_id"]: r["last_at"] for r in session_rows}
         if not session_ids:
             return []
 
@@ -255,7 +256,7 @@ def collect_activity(
 
     # 6. Drop empty digests, sort by recency, then budget-trim.
     digests = [d for d in by_session.values() if d.user_messages or d.assistant_messages]
-    digests.sort(key=lambda d: d.session_id, reverse=True)
+    digests.sort(key=lambda d: session_last_at.get(d.session_id, datetime.min.replace(tzinfo=timezone.utc)), reverse=True)
 
     result: list[ActivityDigest] = []
     total = 0

@@ -26,6 +26,7 @@ _NVIDIA_PREFIX = "nva" + "pi" + "-"
 # whose value starts with a known key prefix. Group 1 is the key value.
 _KEY_LINE_PATTERN = re.compile(
     r"^(?:LLM_API_KEY|OPENAI_API_KEY|NVIDIA_API_KEY|ANTHROPIC_API_KEY)\s*=\s*"
+    r"[\"\']?"
     r"(?:" + _OPENAI_PREFIX + r"|" + _NVIDIA_PREFIX + r")\S+",
     re.MULTILINE,
 )
