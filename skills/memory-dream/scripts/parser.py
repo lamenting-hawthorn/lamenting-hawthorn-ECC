@@ -17,8 +17,8 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import Iterable, List, Sequence
 
 import psycopg
 from psycopg.rows import dict_row
@@ -51,7 +51,7 @@ class ParsedStore:
     """Result of reading typed_memory for one actor scope."""
 
     user_id: str
-    entries: List[MemoryEntry]
+    entries: list[MemoryEntry]
     char_count: int
 
     @property
@@ -88,7 +88,7 @@ _DEFAULT_ORDER_SQL = """
 """
 
 
-def _connect(database_url: str | None = None):
+def _connect(database_url: str | None = None) -> psycopg.Connection:
     url = database_url or os.environ.get("DATABASE_URL", DEFAULT_DATABASE_URL)
     return psycopg.connect(url, row_factory=dict_row)
 
@@ -130,7 +130,12 @@ def parse_typed_memory(
     if skip_superseded:
         where.append("superseded_by IS NULL")
 
-    sql = f"""
+    # Safe: only literal fragments from `where` and the constant
+    # _DEFAULT_ORDER_SQL are interpolated. All user values go through
+    # `%s` placeholders (see `params`). If anyone appends a runtime
+    # value to `where` in the future, this becomes a SQL-injection
+    # vector — keep that in mind when editing.
+    sql = f"""  # noqa: S608
         select
             id, memory_type, category, content, summary,
             confidence, source, visibility, user_id, session_id,
@@ -162,7 +167,7 @@ def parse_typed_memory(
                 superseded_by=str(row["superseded_by"]) if row.get("superseded_by") else None,
             )
             entries.append(entry)
-            total_chars += entry.char_count if hasattr(entry, "char_count") else len(text)
+            total_chars += len(text)
 
     return ParsedStore(user_id=user_id, entries=entries, char_count=total_chars)
 

@@ -37,18 +37,15 @@ it. That keeps the audit chain intact.
 from __future__ import annotations
 
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Iterable, List, Optional
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import psycopg
+from parser import ParsedStore
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
-
-from parser import MemoryEntry, ParsedStore
 from synthesizer import Proposal, SynthesisResult
-
 
 DEFAULT_DATABASE_URL = "postgresql:///agent_memory"
 
@@ -69,7 +66,7 @@ def stage_proposals(
     store: ParsedStore,
     *,
     database_url: str | None = None,
-) -> List[str]:
+) -> list[str]:
     """
     Insert one dream_proposals row per LLM proposal. Returns the list
     of inserted proposal ids (as strings).
@@ -121,7 +118,8 @@ def stage_proposals(
 
 def latest_run(
     *,
-    status_filter: Optional[str] = None,
+    status_filter: str | None = None,
+    user_id: str | None = None,
     database_url: str | None = None,
 ) -> dict | None:
     """Return the most recent dream_runs row as a dict, or None.
@@ -129,22 +127,30 @@ def latest_run(
     The more thorough version of this function is defined further
     down in this file; this top-of-file version exists for callers
     that want to filter by status (e.g. "most recent completed run").
+
+    When ``user_id`` is provided, the lookup is restricted to runs
+    whose ``instructions`` (a free-text field populated from
+    ``--focus`` / ``$DREAM_INSTRUCTIONS``) is the empty string —
+    dream_runs does not currently carry a user_id column. If you need
+    strict user-scoping, add a user_id column to ``memory.dream_runs``
+    and update this query accordingly.
     """
     with _connect(database_url) as conn:
+        params: list = []
+        clauses: list[str] = []
         if status_filter:
-            row = conn.execute(
-                """
-                select * from memory.dream_runs
-                where status = %s
-                order by started_at desc
-                limit 1
-                """,
-                (status_filter,),
-            ).fetchone()
-        else:
-            row = conn.execute(
-                "select * from memory.dream_runs order by started_at desc limit 1"
-            ).fetchone()
+            clauses.append("status = %s")
+            params.append(status_filter)
+        if user_id is not None:
+            # No user_id column on dream_runs; require no instructions
+            # so admin/system runs are excluded for ordinary users.
+            clauses.append("instructions = ''")
+        where = (" where " + " and ".join(clauses)) if clauses else ""
+        row = conn.execute(
+            f"select * from memory.dream_runs{where} "
+            f"order by started_at desc limit 1",
+            params,
+        ).fetchone()
         return dict(row) if row else None
 
 
@@ -154,8 +160,8 @@ def finish_run(
     status: str,
     rows_scanned: int = 0,
     proposals_count: int = 0,
-    summary: Optional[str] = None,
-    error_message: Optional[str] = None,
+    summary: str | None = None,
+    error_message: str | None = None,
     database_url: str | None = None,
 ) -> None:
     """Mark a dream_runs row finished (completed / failed / discarded)."""
@@ -221,7 +227,7 @@ def discard_run(run_id: str, *, database_url: str | None = None) -> int:
         ).fetchall()
         conn.execute(
             "update memory.dream_runs set status = 'discarded', finished_at = now() "
-            "where run_id = %s and status not in ('completed', 'discarded', 'failed')",
+            "where run_id = %s and status not in ('discarded', 'failed')",
             (run_id,),
         )
         conn.commit()
@@ -232,8 +238,8 @@ def adopt_run(
     run_id: str,
     *,
     min_confidence: float = 0.0,
-    proposal_ids: Optional[Iterable[str]] = None,
-    actor_id: Optional[str] = None,
+    proposal_ids: Iterable[str] | None = None,
+    actor_id: str | None = None,
     database_url: str | None = None,
 ) -> AdoptResult:
     """
@@ -426,6 +432,41 @@ def _apply_supersede(conn, prop, actor, run_id) -> None:
     if winner_id == loser_id:
         raise ValueError(f"supersede proposal {prop['id']} self-references")
 
+    # Validate the winner before mutating anything. The proposal is
+    # LLM-generated and could be tampered with or refer to a row that
+    # no longer exists. We require the winner to (a) still exist, (b)
+    # belong to the same user, and (c) match the loser's
+    # memory_type/category so a semantic supersede stays semantically
+    # scoped. Use FOR UPDATE to lock the row for the transaction.
+    winner_row = conn.execute(
+        """
+        select user_id, memory_type, category
+        from memory.typed_memory
+        where id = %s
+          and superseded_by is null
+        for update
+        """,
+        (winner_id,),
+    ).fetchone()
+    if winner_row is None:
+        raise ValueError(
+            f"supersede proposal {prop['id']}: winner row {winner_id} "
+            f"missing or already retired"
+        )
+    if winner_row["user_id"] != prop["user_id"]:
+        raise ValueError(
+            f"supersede proposal {prop['id']}: winner {winner_id} "
+            f"belongs to a different user_id"
+        )
+    if (
+        winner_row["memory_type"] != prop["memory_type"]
+        or winner_row["category"] != prop["category"]
+    ):
+        raise ValueError(
+            f"supersede proposal {prop['id']}: winner {winner_id} "
+            f"has different memory_type/category than the loser"
+        )
+
     # Loser
     conn.execute(
         """
@@ -504,7 +545,8 @@ def _apply_flag(conn, prop, actor, run_id) -> None:
         update memory.typed_memory
         set metadata = metadata || jsonb_build_object('dream_flag',
             jsonb_build_object('flagged_at', now(), 'run_id', %s::text,
-                              'rationale', %s::text))
+                              'rationale', %s::text)),
+            updated_at = now()
         where id = %s
         """,
         (run_id, prop["rationale"] or "", prop["row_id"]),
@@ -521,17 +563,33 @@ def _apply_flag(conn, prop, actor, run_id) -> None:
 # ---------------------------------------------------------------------------
 
 
-def status(*, user_id: Optional[str] = None, database_url: str | None = None) -> dict:
-    """Return current store size, pending proposals count, last run info."""
+def status(*, user_id: str | None = None, database_url: str | None = None) -> dict:
+    """Return current store size, pending proposals count, last run info.
+
+    All counts are scoped to ``user_id`` when provided so a multi-actor
+    store doesn't leak cross-user operational metadata.
+    """
     with _connect(database_url) as conn:
-        store_count = conn.execute(
-            "select count(*) as n from memory.typed_memory where superseded_by is null"
-        ).fetchone()["n"]
-        superseded_count = conn.execute(
-            "select count(*) as n from memory.typed_memory where superseded_by is not null"
-        ).fetchone()["n"]
-        pending = pending_proposals_count(database_url=database_url)
-        last = latest_run(database_url=database_url)
+        if user_id is not None:
+            store_count = conn.execute(
+                "select count(*) as n from memory.typed_memory "
+                "where superseded_by is null and user_id = %s",
+                (user_id,),
+            ).fetchone()["n"]
+            superseded_count = conn.execute(
+                "select count(*) as n from memory.typed_memory "
+                "where superseded_by is not null and user_id = %s",
+                (user_id,),
+            ).fetchone()["n"]
+        else:
+            store_count = conn.execute(
+                "select count(*) as n from memory.typed_memory where superseded_by is null"
+            ).fetchone()["n"]
+            superseded_count = conn.execute(
+                "select count(*) as n from memory.typed_memory where superseded_by is not null"
+            ).fetchone()["n"]
+        pending = pending_proposals_count(user_id=user_id, database_url=database_url)
+        last = latest_run(user_id=user_id, database_url=database_url)
 
     return {
         "store_size": store_count,
@@ -651,16 +709,33 @@ def fail_run(run_id: str, error_message: str, *, database_url: str | None = None
         conn.commit()
 
 
-def pending_proposals_count(*, run_id: str | None = None, database_url: str | None = None) -> int:
+def pending_proposals_count(
+    *,
+    run_id: str | None = None,
+    user_id: str | None = None,
+    database_url: str | None = None,
+) -> int:
     """Number of proposals whose ``reviewer_action`` is null, optionally
-    filtered to a specific run. Defined alongside list_proposals to keep
-    query helpers co-located.
+    filtered to a specific run and/or user.
+
+    When ``user_id`` is provided, only proposals whose underlying
+    ``memory.typed_memory`` row belongs to that user are counted. This
+    prevents cross-user operational metadata leakage in multi-actor
+    stores.
     """
-    sql = "select count(*) as n from memory.dream_proposals where reviewer_action is null"
-    params: tuple = ()
+    sql = (
+        "select count(*) as n "
+        "from memory.dream_proposals p "
+        "join memory.typed_memory m on m.id = p.row_id "
+        "where p.reviewer_action is null"
+    )
+    params: list = []
     if run_id is not None:
-        sql += " and run_id = %s"
-        params = (run_id,)
+        sql += " and p.run_id = %s"
+        params.append(run_id)
+    if user_id is not None:
+        sql += " and m.user_id = %s"
+        params.append(user_id)
     with _connect(database_url) as conn:
         return int(conn.execute(sql, params).fetchone()["n"])
 

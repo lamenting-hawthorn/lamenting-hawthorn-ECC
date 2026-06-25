@@ -30,7 +30,6 @@ import os
 import sys
 import time
 import traceback
-from datetime import datetime, timezone
 from pathlib import Path
 
 # Make sibling modules importable when called directly (e.g. via launchd
@@ -40,6 +39,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 # Auto-load LLM_API_KEY from .env if not already set.
 from _loadenv import load_api_key  # noqa: E402
+
 load_api_key()
 
 import collector  # noqa: E402
@@ -177,15 +177,24 @@ def cmd_run(args) -> int:
         print(f"   Summary: {result.summary}")
 
     # 5. Stage the proposals in memory.dream_proposals.
-    inserted_ids = controller.stage_proposals(run_id, result, store, database_url=args.database_url)
-    controller.finish_run(
-        run_id,
-        status="completed",
-        rows_scanned=store.entry_count,
-        proposals_count=len(inserted_ids),
-        summary=result.summary,
-        database_url=args.database_url,
-    )
+    # Wrap in try/except so any error in stage/finish transitions the
+    # run to 'failed' instead of leaving it stuck in 'in_progress'
+    # (which would block every subsequent run via the pre-flight check).
+    try:
+        inserted_ids = controller.stage_proposals(run_id, result, store, database_url=args.database_url)
+        controller.finish_run(
+            run_id,
+            status="completed",
+            rows_scanned=store.entry_count,
+            proposals_count=len(inserted_ids),
+            summary=result.summary,
+            database_url=args.database_url,
+        )
+    except Exception as exc:
+        controller.fail_run(run_id, str(exc), database_url=args.database_url)
+        print(f"\nERROR: Staging failed: {exc}")
+        traceback.print_exc()
+        return 2
 
     print(f"\n Staged {len(inserted_ids)} proposal(s) for run {run_id}")
     print("\nNext steps:")
@@ -337,14 +346,17 @@ def cmd_runs(args) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(
+    # Note: local var is named `ap` so it does not shadow the imported
+    # `parser` module (sibling: parser.parse_typed_memory). The local
+    # p_run / p_status / etc. are subparser objects.
+    ap = argparse.ArgumentParser(
         prog="dream",
         description="Memory Dream: batch memory curation for agent-architecture",
     )
-    parser.add_argument(
+    ap.add_argument(
         "--database-url", help="Override $DATABASE_URL",
     )
-    sub = parser.add_subparsers(dest="cmd", required=True)
+    sub = ap.add_subparsers(dest="cmd", required=True)
 
     p_run = sub.add_parser("run", help="Run the dream pipeline")
     p_run.add_argument("--user-id", help=f"User to curate (default: $ACTOR_ID or {DEFAULT_ACTOR_ID})")
@@ -391,7 +403,7 @@ def main() -> int:
     p_runs.add_argument("--limit", type=int, default=10)
     p_runs.set_defaults(func=cmd_runs)
 
-    args = parser.parse_args()
+    args = ap.parse_args()
     return args.func(args)
 
 

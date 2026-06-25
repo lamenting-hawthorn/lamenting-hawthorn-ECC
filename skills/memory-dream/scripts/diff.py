@@ -16,14 +16,10 @@ the caller passes in (or to stdout if path is None).
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
-from typing import Iterable
 
 import psycopg
-from psycopg.rows import dict_row
-
 from controller import list_proposals
-
+from psycopg.rows import dict_row
 
 DEFAULT_DATABASE_URL = "postgresql:///agent_memory"
 

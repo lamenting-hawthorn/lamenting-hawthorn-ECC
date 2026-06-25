@@ -20,7 +20,6 @@ Run via:
 
 from __future__ import annotations
 
-import re
 import sys
 import unittest
 from pathlib import Path
@@ -34,24 +33,26 @@ class TestImports(unittest.TestCase):
     """All 8 dream modules must import without a running database."""
 
     def test_loadenv_imports(self):
-        from _loadenv import load_api_key, _strip_bearer
+        from _loadenv import _strip_bearer, load_api_key
         self.assertTrue(callable(load_api_key))
         self.assertTrue(callable(_strip_bearer))
 
     def test_parser_imports(self):
-        from parser import MemoryEntry, ParsedStore, parse_typed_memory, render_entries
+        from parser import parse_typed_memory, render_entries
         self.assertTrue(callable(parse_typed_memory))
         self.assertTrue(callable(render_entries))
 
     def test_collector_imports(self):
-        from collector import collect_activity, ActivityDigest, _extract_text
+        from collector import _extract_text, collect_activity
         self.assertTrue(callable(collect_activity))
         self.assertTrue(callable(_extract_text))
 
     def test_deduplicator_imports(self):
         from deduplicator import (
-            DuplicateGroup, find_exact_dupes, find_substring_dupes,
-            find_common_prefix_dupes, find_all_dupes,
+            find_all_dupes,
+            find_common_prefix_dupes,
+            find_exact_dupes,
+            find_substring_dupes,
         )
         self.assertTrue(callable(find_exact_dupes))
         self.assertTrue(callable(find_substring_dupes))
@@ -60,7 +61,8 @@ class TestImports(unittest.TestCase):
 
     def test_synthesizer_imports(self):
         from synthesizer import (
-            Proposal, SynthesisResult, build_prompt, parse_response,
+            build_prompt,
+            parse_response,
         )
         self.assertTrue(callable(build_prompt))
         self.assertTrue(callable(parse_response))
@@ -92,13 +94,17 @@ class TestImports(unittest.TestCase):
         import importlib.util
         spec = importlib.util.spec_from_file_location("dream", DREAM_DIR / "dream.py")
         self.assertIsNotNone(spec)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self.assertTrue(hasattr(module, "main"))
 
 
 class TestParser(unittest.TestCase):
     """In-memory parser tests (no DB)."""
 
     def setUp(self):
-        from parser import MemoryEntry, ParsedStore
+        from parser import MemoryEntry
         self.entry_a = MemoryEntry(
             row_id="11111111-1111-1111-1111-111111111111",
             text="Mo Memory uses Postgres + pgvector for memory.",
@@ -316,6 +322,11 @@ class TestSchemaAdditions(unittest.TestCase):
             self.text,
             r"create table memory\.dream_proposals[\s\S]+?references memory\.typed_memory\(id\)",
         )
+        # Foreign key to dream_runs (run_id).
+        self.assertRegex(
+            self.text,
+            r"run_id\s+uuid\s+not\s+null\s*\n?\s*references memory\.dream_runs\(run_id\)",
+        )
         # The action check covers all 5 actions.
         for action in ("keep", "merge", "supersede", "archive", "flag_for_review"):
             self.assertIn(f"'{action}'", self.text)
@@ -325,6 +336,13 @@ class TestSchemaAdditions(unittest.TestCase):
         # The status check covers all 4 states.
         for status in ("in_progress", "completed", "failed", "discarded"):
             self.assertIn(f"'{status}'", self.text)
+        # dream_runs must be defined BEFORE dream_proposals so the
+        # dream_proposals.run_id FK can be added at table creation time.
+        runs_idx = self.text.find("create table memory.dream_runs")
+        props_idx = self.text.find("create table memory.dream_proposals")
+        self.assertGreater(runs_idx, 0)
+        self.assertGreater(props_idx, runs_idx,
+                          "dream_runs must be declared before dream_proposals")
 
     def test_indexes(self):
         # At least one dream-specific index.
