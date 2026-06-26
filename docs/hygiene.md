@@ -12,7 +12,7 @@ Every `interval` seconds (default: 3600 = 1 hour), the worker:
 
 1. Calls `memory.run_hygiene_pass()` — a single SQL function in
    `init_schema.sql` that returns a `(operation, deleted_count)`
-   row per cleanup operation. Currently three operations:
+   row per cleanup operation. Currently six operations:
    - `retrieval_logs` — drops `memory.retrieval_logs` and
      `memory.trace_events` older than 30 days.
    - `expired_memory` — drops `memory.typed_memory` rows whose
@@ -20,12 +20,20 @@ Every `interval` seconds (default: 3600 = 1 hour), the worker:
    - `orphan_edges` — drops `memory.memory_edges` whose
      `source_id` or `target_id` no longer matches a live
      `typed_memory.id` (added in this PR).
+   - `audit_log` — drops `memory.audit_log` rows older than
+     90 days (compliance-retention policy).
+   - `pending_approvals` — drops `memory.pending_org_approvals`
+     rows that have been `pending` for more than 30 days.
+   - `old_dream_runs` — drops `memory.dream_runs` rows in
+     terminal states (`completed`/`failed`/`discarded`) older
+     than 30 days. Cascade-deletes the linked
+     `memory.dream_proposals` via the foreign key.
 2. Records one telemetry event per operation to the local telemetry
    database (`~/.ecc/telemetry.db` by default), with name
    `cleanup_<operation>`, kind `agent`, and actor `hygiene-worker`.
 3. Logs a one-line pass summary to stderr in the form:
    ```
-   hygiene pass (0.42s): retrieval_logs=0, expired_memory=3, orphan_edges=17
+   hygiene pass (0.42s): retrieval_logs=12, expired_memory=0, orphan_edges=4, audit_log=50, pending_approvals=2, old_dream_runs=1
    ```
 
 In dry-run mode, the worker prints what it would do without

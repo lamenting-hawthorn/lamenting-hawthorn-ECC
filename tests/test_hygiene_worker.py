@@ -191,6 +191,37 @@ class TestRecordPassMetrics(unittest.TestCase):
         # File should not be created when there's nothing to record.
         self.assertFalse(self._path.exists())
 
+    def test_records_all_six_operations(self):
+        # After the subagent review (deleg_6dc17f25) we expanded the
+        # pass to cover audit_log, pending_approvals, and
+        # old_dream_runs. The worker must record all six.
+        mod = _import_worker()
+        results = [
+            mod.OperationResult(operation="retrieval_logs", deleted_count=12),
+            mod.OperationResult(operation="expired_memory", deleted_count=0),
+            mod.OperationResult(operation="orphan_edges", deleted_count=4),
+            mod.OperationResult(operation="audit_log", deleted_count=50),
+            mod.OperationResult(operation="pending_approvals", deleted_count=2),
+            mod.OperationResult(operation="old_dream_runs", deleted_count=1),
+        ]
+        mod._record_pass_metrics(self._path, results, duration_ms=300)
+        from telemetry import SqliteEventStore
+        store = SqliteEventStore(self._path)
+        try:
+            events = list(store.iter_all())
+        finally:
+            store.close()
+        self.assertEqual(len(events), 6)
+        names = {e.name for e in events}
+        self.assertEqual(names, {
+            "cleanup_retrieval_logs",
+            "cleanup_expired_memory",
+            "cleanup_orphan_edges",
+            "cleanup_audit_log",
+            "cleanup_pending_approvals",
+            "cleanup_old_dream_runs",
+        })
+
 
 class TestEndToEndDryRun(unittest.TestCase):
     """Smoke test: invoke the script as a subprocess to verify
