@@ -68,9 +68,9 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 # Imports below intentionally follow the sys.path manipulation so
 # the worker can be invoked as ``python scripts/hygiene-worker.py``
 # without requiring the user to set PYTHONPATH first.
-import psycopg  # noqa: E402
-from psycopg.rows import dict_row  # noqa: E402
-
+# ``psycopg`` is imported lazily inside ``_run_pass`` so that
+# ``--help`` and ``--dry-run`` work on machines that do not have
+# psycopg installed (e.g. for reviewing the script's docs).
 from telemetry import EventKind, SqliteEventStore, TelemetryCollector  # noqa: E402
 
 _LOGGER = logging.getLogger("ecc.hygiene")
@@ -171,6 +171,20 @@ def _resolve_telemetry_path(args: argparse.Namespace) -> Path:
     return Path(args.telemetry_db).expanduser()
 
 
+def _db_error_class() -> type[BaseException]:
+    """Return the psycopg.Error base class, lazily.
+
+    Used in the daemon's error-handling ``except`` clause. Falls back
+    to ``Exception`` when psycopg is not installed so the worker
+    still surfaces a clean error path during --help or --dry-run.
+    """
+    try:
+        import psycopg
+    except ImportError:
+        return Exception
+    return psycopg.Error
+
+
 def _run_pass(database_url: str, dry_run: bool) -> list[OperationResult]:
     """Run a single ``memory.run_hygiene_pass()`` call and parse the result.
 
@@ -180,6 +194,12 @@ def _run_pass(database_url: str, dry_run: bool) -> list[OperationResult]:
     if dry_run:
         _LOGGER.info("[dry-run] would call memory.run_hygiene_pass()")
         return []
+
+    # Lazy import: psycopg is only needed when actually connecting.
+    # This lets --help and --dry-run work on machines without the
+    # Postgres driver installed.
+    import psycopg
+    from psycopg.rows import dict_row
 
     with psycopg.connect(database_url, row_factory=dict_row) as conn:
         rows = conn.execute("select * from memory.run_hygiene_pass()").fetchall()
@@ -250,7 +270,7 @@ def _execute_one_pass(
     t0 = time.monotonic()
     try:
         results = _run_pass(database_url, args.dry_run)
-    except psycopg.Error as exc:
+    except _db_error_class() as exc:
         _LOGGER.error("hygiene pass %d failed: %s", pass_count, exc)
         if args.once:
             return 2

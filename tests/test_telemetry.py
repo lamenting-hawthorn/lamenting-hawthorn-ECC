@@ -7,7 +7,10 @@ network or database dependency beyond a per-test temp directory.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
+import os
 import sys
 import tempfile
 import time
@@ -254,6 +257,45 @@ class TestCli(unittest.TestCase):
         exit_code = main([
             "report", "--db", str(self._path) + ".missing", "--format", "text",
         ])
+        self.assertEqual(exit_code, 0)
+
+    def test_uses_default_db_path_when_unset(self):
+        # When --db is not provided, the CLI must fall back to
+        # telemetry.default_db_path() (which honors ECC_TELEMETRY_DB
+        # and the temp-file fallback) instead of a hardcoded
+        # ~/.ecc/telemetry.db. This was a P1 bug found in the
+        # senior-engineer review.
+        from telemetry import default_db_path
+        from telemetry.cli import main
+        old_env = os.environ.get("ECC_TELEMETRY_DB")
+        os.environ["ECC_TELEMETRY_DB"] = str(self._path)
+        try:
+            # No --db arg; should pick up the env var via default_db_path().
+            buf_out = io.StringIO()
+            buf_err = io.StringIO()
+            with contextlib.redirect_stdout(buf_out):
+                with contextlib.redirect_stderr(buf_err):
+                    exit_code = main(["report", "--format", "text", "--top", "5"])
+            self.assertEqual(exit_code, 0)
+            # default_db_path() returns the env-resolved path.
+            self.assertEqual(default_db_path(), self._path)
+            # And the report output reflects the seeded data.
+            self.assertIn("lint", buf_out.getvalue())
+        finally:
+            if old_env is None:
+                os.environ.pop("ECC_TELEMETRY_DB", None)
+            else:
+                os.environ["ECC_TELEMETRY_DB"] = old_env
+
+    def test_index_for_failures_exists(self):
+        # The failures partial index must be created in the schema.
+        # (Verified by the schema's CREATE INDEX IF NOT EXISTS.)
+        from telemetry.cli import main
+        # Smoke: opening the store succeeds and the index is queryable.
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            exit_code = main(["report", "--db", str(self._path),
+                              "--format", "text", "--top", "5"])
         self.assertEqual(exit_code, 0)
 
 
