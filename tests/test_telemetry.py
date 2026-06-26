@@ -299,5 +299,62 @@ class TestCli(unittest.TestCase):
         self.assertEqual(exit_code, 0)
 
 
+class TestRecordInvocationScript(unittest.TestCase):
+    """Tests for scripts/record_invocation.py."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._path = Path(self._tmp.name) / "telemetry.db"
+        self._old_env = os.environ.get("ECC_TELEMETRY_DB")
+        os.environ["ECC_TELEMETRY_DB"] = str(self._path)
+
+    def tearDown(self) -> None:
+        if self._old_env is None:
+            os.environ.pop("ECC_TELEMETRY_DB", None)
+        else:
+            os.environ["ECC_TELEMETRY_DB"] = self._old_env
+
+    def _invoke(self, *extra: str) -> int:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "record_invocation", str(Path(__file__).resolve().parents[1] / "scripts" / "record_invocation.py"),
+        )
+        assert spec is not None and spec.loader is not None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.main(["--name", "cost-report", "--kind", "command",
+                         "--duration-ms", "42", "--success", "1", *extra])
+
+    def test_writes_event_to_db(self):
+        exit_code = self._invoke()
+        self.assertEqual(exit_code, 0)
+        store = SqliteEventStore(self._path)
+        self.addCleanup(store.close)
+        events = list(store.iter_all())
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].name, "cost-report")
+        self.assertEqual(events[0].kind, EventKind.COMMAND)
+        self.assertEqual(events[0].duration_ms, 42)
+        self.assertTrue(events[0].success)
+
+    def test_failure_event_persists(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "record_invocation", str(Path(__file__).resolve().parents[1] / "scripts" / "record_invocation.py"),
+        )
+        assert spec is not None and spec.loader is not None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        exit_code = mod.main(["--name", "x", "--kind", "skill",
+                              "--duration-ms", "10", "--success", "0"])
+        self.assertEqual(exit_code, 0)
+        store = SqliteEventStore(self._path)
+        self.addCleanup(store.close)
+        events = list(store.iter_all())
+        self.assertEqual(len(events), 1)
+        self.assertFalse(events[0].success)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

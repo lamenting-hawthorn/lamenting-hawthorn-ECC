@@ -75,18 +75,25 @@ python scripts/hygiene-worker.py --once --dry-run
 `docs/launchd/com.ecc.hygiene.plist` ships with the repo. To install:
 
 ```bash
-cp docs/launchd/com.ecc.hygiene.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.ecc.hygiene.plist
+bash scripts/install-hygiene-worker.sh --load
+```
+
+The script substitutes `<HOME>` and `<PYTHON_PATH>` placeholders with
+absolute paths, writes the plist to
+`~/Library/LaunchAgents/com.ecc.hygiene.plist`, and loads it via
+`launchctl`. Omit `--load` to write the plist without loading.
+
+To uninstall:
+
+```bash
+launchctl unload ~/Library/LaunchAgents/com.ecc.hygiene.plist
+rm ~/Library/LaunchAgents/com.ecc.hygiene.plist
 ```
 
 The plist runs the worker hourly via `StartInterval` (matching the
 worker's default `--interval`). It does not use `KeepAlive` because
 the worker exits after each pass and launchd respawns it on the
 schedule.
-
-Logs:
-- `~/Library/Logs/com.ecc.hygiene.log` (stdout)
-- `~/Library/Logs/com.ecc.hygiene.err` (stderr)
 
 ## Why a worker, not pg_cron
 
