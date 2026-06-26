@@ -701,14 +701,27 @@ $$ language plpgsql;
 -- after those tables exist.
 
 -- 6c. Clean up retrieval logs (retention: 30 days)
+--
+-- Returns the total deleted row count so the caller (the application-
+-- side hygiene worker) can record an accurate metric. The previous
+-- version returned ``void`` which forced ``run_hygiene_pass`` to
+-- fake the count with ``(result IS NULL)::int`` (always 1). This
+-- change makes the metric honest.
 create or replace function event_store.cleanup_retrieval_logs()
-returns void as $$
+returns integer as $$
+declare
+    retrieval_deleted integer;
+    trace_deleted integer;
 begin
     delete from memory.retrieval_logs
     where created_at < now() - interval '30 days';
+    get diagnostics retrieval_deleted = row_count;
 
     delete from memory.trace_events
     where created_at < now() - interval '30 days';
+    get diagnostics trace_deleted = row_count;
+
+    return retrieval_deleted + trace_deleted;
 end;
 $$ language plpgsql;
 
@@ -733,6 +746,127 @@ $$ language plpgsql;
 -- Run every minute via pg_cron, or call from application-side background thread:
 -- select cron.schedule('cleanup-expired-memory', '* * * * *',
 --     $$select memory.cleanup_expired_memory()$$);
+
+-- 6e. Clean up orphan memory_edges
+--
+-- Edges in memory.memory_edges reference typed_memory rows by id
+-- (source_id, target_id). When a typed_memory row is deleted (e.g.
+-- by cleanup_expired_memory or by a supersede in memory-dream) the
+-- edges pointing to it become orphans. They never surface in graph
+-- queries (the join on typed_memory filters them out) but they
+-- accumulate in storage. This function deletes any edge whose
+-- source or target no longer exists.
+--
+-- Returns the number of edges deleted so the caller can record the
+-- metric in telemetry.
+create or replace function memory.cleanup_orphan_edges()
+returns integer as $$
+declare
+    deleted_count integer;
+begin
+    delete from memory.memory_edges e
+    where not exists (
+        select 1 from memory.typed_memory m
+        where m.id::text = e.source_id
+    )
+    or not exists (
+        select 1 from memory.typed_memory m
+        where m.id::text = e.target_id
+    );
+    get diagnostics deleted_count = row_count;
+    return deleted_count;
+end;
+$$ language plpgsql;
+
+-- 6f. Clean up old audit_log rows (retention: 90 days)
+--
+-- The audit_log is unbounded growth: every memory write, read,
+-- and permission check appends a row. Without a TTL the table
+-- grows by 100s of rows per day per active user. Retention of
+-- 90 days is enough for incident review and compliance audits
+-- without keeping the table a permanent write log.
+create or replace function memory.cleanup_audit_log()
+returns integer as $$
+declare
+    deleted_count integer;
+begin
+    delete from memory.audit_log
+    where created_at < now() - interval '90 days';
+    get diagnostics deleted_count = row_count;
+    return deleted_count;
+end;
+$$ language plpgsql;
+
+-- Run weekly via the hygiene worker (less frequent than the
+-- hourly expired-memory sweep):
+-- select cron.schedule('cleanup-audit-log', '0 3 * * 0',
+--     $$select memory.cleanup_audit_log()$$);
+
+-- 6g. Clean up stale pending_org_approvals (older than 30 days)
+--
+-- A pending approval is a memory row that requires human review
+-- before it goes live. If the reviewer never acts, the row sits
+-- in 'pending' status forever. We delete rows that have been
+-- 'pending' for more than 30 days; the original memory row (in
+-- typed_memory) is unaffected and can still be re-proposed if
+-- needed.
+create or replace function memory.cleanup_pending_org_approvals()
+returns integer as $$
+declare
+    deleted_count integer;
+begin
+    delete from memory.pending_org_approvals
+    where status = 'pending'
+      and proposed_at < now() - interval '30 days';
+    get diagnostics deleted_count = row_count;
+    return deleted_count;
+end;
+$$ language plpgsql;
+
+-- 6h. Clean up old dream_runs (terminal states, retention: 30 days)
+--
+-- dream_runs accumulates one row per memory-dream.py invocation.
+-- In-flight rows (status='in_progress') are kept; only terminal
+-- states (completed, failed, discarded) older than 30 days are
+-- removed. dream_proposals cascade-delete via the FK so the
+-- staging table is cleaned up with its run.
+create or replace function memory.cleanup_old_dream_runs()
+returns integer as $$
+declare
+    deleted_count integer;
+begin
+    delete from memory.dream_runs
+    where status in ('completed', 'failed', 'discarded')
+      and finished_at is not null
+      and finished_at < now() - interval '30 days';
+    get diagnostics deleted_count = row_count;
+    return deleted_count;
+end;
+$$ language plpgsql;
+
+-- 6i. Updated run_hygiene_pass() to include the new cleanups.
+--
+-- The expanded pass covers every unbounded-growth table identified
+-- in the hygiene review (subagent deleg_6dc17f25): retrieval logs,
+-- expired memory, orphan edges, audit log, stale approvals, old
+-- dream runs. All return ``integer`` so the UNION ALL is uniform.
+create or replace function memory.run_hygiene_pass()
+returns table(operation text, deleted_count integer) as $$
+begin
+    return query
+        select 'retrieval_logs'::text, event_store.cleanup_retrieval_logs()
+        union all
+        select 'expired_memory'::text, memory.cleanup_expired_memory()
+        union all
+        select 'orphan_edges'::text, memory.cleanup_orphan_edges()
+        union all
+        select 'audit_log'::text, memory.cleanup_audit_log()
+        union all
+        select 'pending_approvals'::text, memory.cleanup_pending_org_approvals()
+        union all
+        select 'old_dream_runs'::text, memory.cleanup_old_dream_runs();
+end;
+$$ language plpgsql;
 
 -- =================================================================
 -- 7. USEFUL VIEWS
