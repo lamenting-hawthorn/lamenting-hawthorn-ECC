@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "totalCommands": 92,
+  "totalCommands": 93,
   "commands": [
     {
       "command": "aside",
@@ -960,6 +960,15 @@
       "path": "commands/skill-health.md"
     },
     {
+      "command": "telemetry-report",
+      "description": "Generate a skill/command invocation report from the ECC telemetry database.",
+      "type": "planning",
+      "primaryAgents": [],
+      "allAgents": [],
+      "skills": [],
+      "path": "commands/telemetry-report.md"
+    },
+    {
       "command": "test-coverage",
       "description": "Analyze coverage, identify gaps, and generate missing tests toward the target threshold.",
       "type": "testing",
@@ -1009,7 +1018,7 @@
       "build": 2,
       "general": 10,
       "orchestration": 11,
-      "planning": 2,
+      "planning": 3,
       "refactoring": 1,
       "review": 13,
       "testing": 53
