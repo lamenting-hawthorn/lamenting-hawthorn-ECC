@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.ecc.hygiene.plist — ECC memory hygiene worker.
+
+  Runs scripts/hygiene-worker.py on a 1-hour interval. The worker
+  invokes memory.run_hygiene_pass() (defined in init_schema.sql) to
+  clean up retrieval logs, expired typed_memory rows, and orphan
+  memory_edges. It also records per-pass metrics to the local
+  telemetry database.
+
+  Cadence: hourly (3600 s). Same as the default interval in
+  hygiene-worker.py. The actual cadence is set in the worker, not
+  here; this plist just provides the launch-on-boot and keep-alive
+  behavior.
+
+  Replace <PYTHON_PATH>, <HOME>, and <USER> below before loading.
+
+  To install:
+    cp com.ecc.hygiene.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.ecc.hygiene.plist
+
+  To uninstall:
+    launchctl unload ~/Library/LaunchAgents/com.ecc.hygiene.plist
+    rm ~/Library/LaunchAgents/com.ecc.hygiene.plist
+
+  Logs:
+    stdout: ~/Library/Logs/com.ecc.hygiene.log
+    stderr: ~/Library/Logs/com.ecc.hygiene.err
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ecc.hygiene</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>&lt;PYTHON_PATH&gt;</string>
+        <string>&lt;HOME&gt;/lamenting-hawthorn-ECC/scripts/hygiene-worker.py</string>
+        <string>--interval</string>
+        <integer>3600</integer>
+    </array>
+    <key>StartInterval</key>
+    <integer>3600</integer>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>DATABASE_URL</key>
+        <string>postgresql:///agent_memory</string>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>&lt;HOME&gt;/Library/Logs/com.ecc.hygiene.log</string>
+    <key>StandardErrorPath</key>
+    <string>&lt;HOME&gt;/Library/Logs/com.ecc.hygiene.err</string>
+</dict>
+</plist>
