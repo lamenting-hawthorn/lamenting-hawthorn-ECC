@@ -244,6 +244,7 @@ commands:
   - setup-pm
   - skill-create
   - skill-health
+  - telemetry-report
   - test-coverage
   - update-codemaps
   - update-docs
