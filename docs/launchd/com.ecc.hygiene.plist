@@ -3,18 +3,18 @@
 <!--
   com.ecc.hygiene.plist — ECC memory hygiene worker.
 
-  Runs scripts/hygiene-worker.py on a 1-hour interval. The worker
-  invokes memory.run_hygiene_pass() (defined in init_schema.sql) to
-  clean up retrieval logs, expired typed_memory rows, and orphan
-  memory_edges. It also records per-pass metrics to the local
-  telemetry database.
+  Runs scripts/hygiene-worker.py once per hour. The plist uses
+  launchd's StartInterval (3600 s) to schedule the work; the
+  worker is invoked with --once so it exits after a single pass.
+  launchd respawns it on the schedule.
 
-  Cadence: hourly (3600 s). Same as the default interval in
-  hygiene-worker.py. The actual cadence is set in the worker, not
-  here; this plist just provides the launch-on-boot and keep-alive
-  behavior.
+  The worker invokes memory.run_hygiene_pass() (defined in
+  init_schema.sql) to clean up retrieval logs, expired
+  typed_memory rows, orphan memory_edges, the audit log,
+  stale pending approvals, and old dream runs. It also records
+  per-pass metrics to the local telemetry database.
 
-  Replace <PYTHON_PATH>, <HOME>, and <USER> below before loading.
+  Replace <PYTHON_PATH> and <HOME> below before loading.
 
   To install:
     cp com.ecc.hygiene.plist ~/Library/LaunchAgents/
@@ -36,8 +36,7 @@
     <array>
         <string>&lt;PYTHON_PATH&gt;</string>
         <string>&lt;HOME&gt;/lamenting-hawthorn-ECC/scripts/hygiene-worker.py</string>
-        <string>--interval</string>
-        <integer>3600</integer>
+        <string>--once</string>
     </array>
     <key>StartInterval</key>
     <integer>3600</integer>

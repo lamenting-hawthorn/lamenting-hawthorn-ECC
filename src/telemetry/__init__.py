@@ -125,6 +125,12 @@ CREATE INDEX IF NOT EXISTS idx_telemetry_events_started_at
     ON telemetry_events(started_at);
 CREATE INDEX IF NOT EXISTS idx_telemetry_events_kind_name
     ON telemetry_events(kind, name, started_at);
+-- Partial index for the "show me failing skills" query: most rows
+-- are successes so a partial index on the rare failure cases is
+-- smaller and faster.
+CREATE INDEX IF NOT EXISTS idx_telemetry_events_failures
+    ON telemetry_events(kind, name, started_at)
+    WHERE success = 0;
 """
 
 

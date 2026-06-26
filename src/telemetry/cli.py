@@ -13,7 +13,7 @@ import logging
 import sys
 from pathlib import Path
 
-from telemetry import SqliteEventStore
+from telemetry import SqliteEventStore, default_db_path
 from telemetry.reports import (
     TelemetryReport,
     build_report,
@@ -34,8 +34,9 @@ def _build_parser() -> argparse.ArgumentParser:
     report.add_argument(
         "--db",
         type=Path,
-        default=Path("~/.ecc/telemetry.db").expanduser(),
-        help="Path to the telemetry SQLite database",
+        default=None,  # resolved at runtime via default_db_path()
+        help="Path to the telemetry SQLite database "
+        "(default: $ECC_TELEMETRY_DB or ~/.ecc/telemetry.db)",
     )
     report.add_argument(
         "--format",
@@ -83,7 +84,7 @@ def _render_json(report: TelemetryReport) -> str:
 
 
 def _cmd_report(args: argparse.Namespace) -> int:
-    db_path: Path = args.db
+    db_path: Path = args.db if args.db is not None else default_db_path()
     if not db_path.exists():
         print(
             f"Telemetry not set up: {db_path} not found. "

@@ -778,33 +778,7 @@ begin
 end;
 $$ language plpgsql;
 
--- Run hourly via pg_cron, or call from the hygiene worker:
--- select cron.schedule('cleanup-orphan-edges', '0 * * * *',
---     $$select memory.cleanup_orphan_edges()$$);
-
--- 6f. Run all hygiene cleanup functions in one call.
---
--- Convenience wrapper that invokes the per-table cleanup functions
--- and returns a small result table the application can use to
--- record per-pass metrics. The application-side hygiene worker
--- (scripts/hygiene-worker.py) prefers this single call over
--- invoking each function separately.
---
--- All underlying functions return ``integer`` (count of deleted
--- rows), so the UNION ALL here is a uniform shape — no cast hacks.
-create or replace function memory.run_hygiene_pass()
-returns table(operation text, deleted_count integer) as $$
-begin
-    return query
-        select 'retrieval_logs'::text, event_store.cleanup_retrieval_logs()
-        union all
-        select 'expired_memory'::text, memory.cleanup_expired_memory()
-        union all
-        select 'orphan_edges'::text, memory.cleanup_orphan_edges();
-end;
-$$ language plpgsql;
-
--- 6g. Clean up old audit_log rows (retention: 90 days)
+-- 6f. Clean up old audit_log rows (retention: 90 days)
 --
 -- The audit_log is unbounded growth: every memory write, read,
 -- and permission check appends a row. Without a TTL the table
@@ -828,7 +802,7 @@ $$ language plpgsql;
 -- select cron.schedule('cleanup-audit-log', '0 3 * * 0',
 --     $$select memory.cleanup_audit_log()$$);
 
--- 6h. Clean up stale pending_org_approvals (older than 30 days)
+-- 6g. Clean up stale pending_org_approvals (older than 30 days)
 --
 -- A pending approval is a memory row that requires human review
 -- before it goes live. If the reviewer never acts, the row sits
@@ -849,7 +823,7 @@ begin
 end;
 $$ language plpgsql;
 
--- 6i. Clean up old dream_runs (terminal states, retention: 30 days)
+-- 6h. Clean up old dream_runs (terminal states, retention: 30 days)
 --
 -- dream_runs accumulates one row per memory-dream.py invocation.
 -- In-flight rows (status='in_progress') are kept; only terminal
@@ -870,7 +844,7 @@ begin
 end;
 $$ language plpgsql;
 
--- 6j. Updated run_hygiene_pass() to include the new cleanups.
+-- 6i. Updated run_hygiene_pass() to include the new cleanups.
 --
 -- The expanded pass covers every unbounded-growth table identified
 -- in the hygiene review (subagent deleg_6dc17f25): retrieval logs,
