@@ -734,6 +734,60 @@ $$ language plpgsql;
 -- select cron.schedule('cleanup-expired-memory', '* * * * *',
 --     $$select memory.cleanup_expired_memory()$$);
 
+-- 6e. Clean up orphan memory_edges
+--
+-- Edges in memory.memory_edges reference typed_memory rows by id
+-- (source_id, target_id). When a typed_memory row is deleted (e.g.
+-- by cleanup_expired_memory or by a supersede in memory-dream) the
+-- edges pointing to it become orphans. They never surface in graph
+-- queries (the join on typed_memory filters them out) but they
+-- accumulate in storage. This function deletes any edge whose
+-- source or target no longer exists.
+--
+-- Returns the number of edges deleted so the caller can record the
+-- metric in telemetry.
+create or replace function memory.cleanup_orphan_edges()
+returns integer as $$
+declare
+    deleted_count integer;
+begin
+    delete from memory.memory_edges e
+    where not exists (
+        select 1 from memory.typed_memory m
+        where m.id::text = e.source_id
+    )
+    or not exists (
+        select 1 from memory.typed_memory m
+        where m.id::text = e.target_id
+    );
+    get diagnostics deleted_count = row_count;
+    return deleted_count;
+end;
+$$ language plpgsql;
+
+-- Run hourly via pg_cron, or call from the hygiene worker:
+-- select cron.schedule('cleanup-orphan-edges', '0 * * * *',
+--     $$select memory.cleanup_orphan_edges()$$);
+
+-- 6f. Run all hygiene cleanup functions in one call.
+--
+-- Convenience wrapper that invokes the per-table cleanup functions
+-- and returns a small result table the application can use to
+-- record per-pass metrics. The application-side hygiene worker
+-- (scripts/hygiene-worker.py) prefers this single call over
+-- invoking each function separately.
+create or replace function memory.run_hygiene_pass()
+returns table(operation text, deleted_count integer) as $$
+begin
+    return query
+        select 'retrieval_logs'::text, (event_store.cleanup_retrieval_logs() is null)::int
+        union all
+        select 'expired_memory'::text, memory.cleanup_expired_memory()
+        union all
+        select 'orphan_edges'::text, memory.cleanup_orphan_edges();
+end;
+$$ language plpgsql;
+
 -- =================================================================
 -- 7. USEFUL VIEWS
 -- =================================================================
