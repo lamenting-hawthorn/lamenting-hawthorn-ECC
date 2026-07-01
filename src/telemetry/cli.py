@@ -23,6 +23,13 @@ from telemetry.reports import (
 _LOGGER = logging.getLogger("ecc.telemetry.cli")
 
 
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m telemetry.cli",
@@ -46,7 +53,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     report.add_argument(
         "--top",
-        type=int,
+        type=_positive_int,
         default=20,
         help="Top-N cap for the per-name table",
     )

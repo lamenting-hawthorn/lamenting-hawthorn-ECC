@@ -16,6 +16,7 @@ the caller passes in (or to stdout if path is None).
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from controller import list_proposals
 
@@ -187,12 +188,32 @@ def write_diff(
     *,
     user_id: str,
     database_url: str | None = None,
+    base_dir: str | os.PathLike[str] | None = None,
 ) -> int:
     """Write the diff markdown to ``path``. Returns the byte count."""
     md = generate_diff_markdown(run_id, user_id=user_id, database_url=database_url)
-    with open(path, "w", encoding="utf-8") as f:
+    target = _resolve_output_path(path, base_dir=base_dir)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("w", encoding="utf-8") as f:
         f.write(md)
     return len(md.encode("utf-8"))
+
+
+def _resolve_output_path(
+    path: str,
+    *,
+    base_dir: str | os.PathLike[str] | None = None,
+) -> Path:
+    base = Path(base_dir or os.getcwd()).resolve()
+    target = Path(path).expanduser()
+    if not target.is_absolute():
+        target = base / target
+    target = target.resolve()
+    try:
+        target.relative_to(base)
+    except ValueError as exc:
+        raise ValueError(f"output path must stay under {base}") from exc
+    return target
 
 
 if __name__ == "__main__":

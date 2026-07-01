@@ -271,13 +271,22 @@ def cmd_proposals(args) -> int:
 
 def cmd_diff(args) -> int:
     user_id = args.user_id or DEFAULT_ACTOR_ID
-    md = diff.generate_diff_markdown(
-        args.run_id, user_id=user_id, database_url=args.database_url,
-    )
     if args.out:
-        Path(args.out).write_text(md, encoding="utf-8")
-        print(f"wrote {args.out} ({len(md)} chars)")
+        try:
+            byte_count = diff.write_diff(
+                args.run_id,
+                args.out,
+                user_id=user_id,
+                database_url=args.database_url,
+            )
+        except ValueError as exc:
+            print(f"ERROR: {exc}")
+            return 1
+        print(f"wrote {args.out} ({byte_count} bytes)")
     else:
+        md = diff.generate_diff_markdown(
+            args.run_id, user_id=user_id, database_url=args.database_url,
+        )
         sys.stdout.write(md)
     return 0
 
@@ -293,7 +302,11 @@ def cmd_adopt(args) -> int:
             return 1
         print(f"This will apply {pending} proposal(s) to memory.typed_memory.")
         print("Each proposal writes an entry to memory.audit_log.")
-        resp = input("Proceed? [y/N] ").strip().lower()
+        try:
+            resp = input("Proceed? [y/N] ").strip().lower()
+        except EOFError:
+            print("Aborted: confirmation required in non-interactive mode. Re-run with --yes.")
+            return 1
         if resp != "y":
             print("Aborted.")
             return 1
@@ -304,6 +317,7 @@ def cmd_adopt(args) -> int:
         actor_id=args.actor_id,
         user_id=user_id,
         database_url=args.database_url,
+        allow_legacy_admin=args.allow_legacy_admin,
     )
     print(f" Adopted {result.adopted}, rejected {result.rejected}, "
           f"skipped {result.skipped}")
@@ -321,13 +335,20 @@ def cmd_discard(args) -> int:
         if pending == 0:
             print(f"no pending proposals for run_id={args.run_id}")
             return 1
-        resp = input(f"Discard {pending} proposal(s)? [y/N] ").strip().lower()
+        try:
+            resp = input(f"Discard {pending} proposal(s)? [y/N] ").strip().lower()
+        except EOFError:
+            print("Aborted: confirmation required in non-interactive mode. Re-run with --yes.")
+            return 1
         if resp != "y":
             print("Aborted.")
             return 1
     try:
         n = controller.discard_run(
-            args.run_id, user_id=user_id, database_url=args.database_url,
+            args.run_id,
+            user_id=user_id,
+            database_url=args.database_url,
+            allow_legacy_admin=args.allow_legacy_admin,
         )
     except PermissionError as exc:
         print(f"ERROR: {exc}")
@@ -425,12 +446,22 @@ def main() -> int:
     p_adopt.add_argument("--min-confidence", type=float, default=0.0)
     p_adopt.add_argument("--actor-id", help="Override actor for audit_log")
     p_adopt.add_argument("--user-id", help=f"Expected run owner (default: $ACTOR_ID or {DEFAULT_ACTOR_ID})")
+    p_adopt.add_argument(
+        "--allow-legacy-admin",
+        action="store_true",
+        help="Allow review of legacy/admin dream_runs with a null owner; proposals stay scoped to --user-id",
+    )
     p_adopt.set_defaults(func=cmd_adopt)
 
     p_disc = sub.add_parser("discard", help="Reject all pending proposals in a run")
     p_disc.add_argument("run_id")
     p_disc.add_argument("-y", "--yes", action="store_true")
     p_disc.add_argument("--user-id", help=f"Expected run owner (default: $ACTOR_ID or {DEFAULT_ACTOR_ID})")
+    p_disc.add_argument(
+        "--allow-legacy-admin",
+        action="store_true",
+        help="Allow review of legacy/admin dream_runs with a null owner; proposals stay scoped to --user-id",
+    )
     p_disc.set_defaults(func=cmd_discard)
 
     p_runs = sub.add_parser("runs", help="List recent dream runs")

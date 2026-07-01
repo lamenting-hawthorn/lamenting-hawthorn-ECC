@@ -271,6 +271,12 @@ class TestCli(unittest.TestCase):
         ])
         self.assertEqual(exit_code, 0)
 
+    def test_non_positive_top_is_rejected(self):
+        from telemetry.cli import main
+        with self.assertRaises(SystemExit) as ctx:
+            main(["report", "--db", str(self._path), "--top", "0"])
+        self.assertEqual(ctx.exception.code, 2)
+
     def test_uses_default_db_path_when_unset(self):
         # When --db is not provided, the CLI must fall back to
         # telemetry.default_db_path() (which honors ECC_TELEMETRY_DB

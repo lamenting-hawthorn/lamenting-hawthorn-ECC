@@ -382,8 +382,19 @@ create or replace function memory.get_current_role() returns text as $$
     select current_setting('app.current_role', true);
 $$ language sql stable;
 
+create or replace function memory.has_trusted_service_identity() returns boolean as $$
+    select
+        current_user in ('postgres', 'service_role', 'agent_memory_service', 'ecc_service')
+        or session_user in ('postgres', 'service_role', 'agent_memory_service', 'ecc_service')
+        or (
+            to_regrole('memory_service') is not null
+            and pg_has_role(current_user, 'memory_service', 'member')
+        );
+$$ language sql stable;
+
 create or replace function memory.is_service_role() returns boolean as $$
-    select memory.get_current_role() = 'service';
+    select memory.get_current_role() = 'service'
+       and memory.has_trusted_service_identity();
 $$ language sql stable;
 
 -- 4a. typed_memory RLS

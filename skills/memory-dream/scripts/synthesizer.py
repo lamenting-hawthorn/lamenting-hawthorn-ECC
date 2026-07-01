@@ -388,10 +388,9 @@ def parse_response(response: str) -> SynthesisResult:
         data = json.loads(text)
     except json.JSONDecodeError as exc:
         response_hash = hashlib.sha256(response.encode("utf-8")).hexdigest()[:16]
-        preview = text.replace("\n", " ")[:240]
         raise RuntimeError(
             "LLM returned invalid JSON: "
-            f"{exc}. response_sha256={response_hash} preview={preview!r}"
+            f"{exc}. response_sha256={response_hash}"
         ) from exc
 
     if not isinstance(data, dict):

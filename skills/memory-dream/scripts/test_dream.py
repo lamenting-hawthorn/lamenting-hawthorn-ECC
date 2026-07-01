@@ -20,13 +20,69 @@ Run via:
 
 from __future__ import annotations
 
+import io
+import os
 import sys
+import tempfile
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DREAM_DIR = REPO_ROOT / "skills" / "memory-dream" / "scripts"
 SCHEMA_PATH = REPO_ROOT / "init_schema.sql"
+
+
+class _FakeResult:
+    def __init__(self, *, one=None, many=None):
+        self._one = one
+        self._many = [] if many is None else many
+
+    def fetchone(self):
+        return self._one
+
+    def fetchall(self):
+        return self._many
+
+
+class _FakeTransaction:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+class _FakeControllerConn:
+    def __init__(self, *, owner, pending=False):
+        self.owner = owner
+        self.pending = pending
+        self.calls: list[tuple[str, object]] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def transaction(self):
+        return _FakeTransaction()
+
+    def commit(self):
+        self.calls.append(("commit", None))
+
+    def execute(self, sql, params=None):
+        self.calls.append((sql, params))
+        if "select user_id" in sql and "from memory.dream_runs" in sql:
+            return _FakeResult(one={"user_id": self.owner})
+        if "select 1" in sql and "from memory.dream_proposals" in sql:
+            return _FakeResult(one={"?column?": 1} if self.pending else None)
+        if "from memory.dream_proposals p" in sql:
+            return _FakeResult(many=[])
+        if "update memory.dream_proposals" in sql:
+            return _FakeResult(many=[])
+        return _FakeResult()
 
 
 class TestImports(unittest.TestCase):
@@ -143,6 +199,31 @@ class TestImports(unittest.TestCase):
         self.assertTrue(callable(generate_diff_markdown))
         self.assertTrue(callable(write_diff))
 
+    def test_write_diff_rejects_paths_outside_workspace(self):
+        import diff
+
+        with tempfile.TemporaryDirectory() as tmp:
+            original = diff.generate_diff_markdown
+            diff.generate_diff_markdown = lambda *a, **kw: "# ok\n"
+            try:
+                written = diff.write_diff(
+                    "00000000-0000-0000-0000-000000000000",
+                    "reports/dream.md",
+                    user_id="u_test",
+                    base_dir=tmp,
+                )
+                self.assertEqual(written, len("# ok\n".encode("utf-8")))
+                self.assertTrue((Path(tmp) / "reports" / "dream.md").exists())
+                with self.assertRaises(ValueError):
+                    diff.write_diff(
+                        "00000000-0000-0000-0000-000000000000",
+                        "../escape.md",
+                        user_id="u_test",
+                        base_dir=tmp,
+                    )
+            finally:
+                diff.generate_diff_markdown = original
+
     def test_dream_cli_imports(self):
         # Non-LLM subcommands such as status/diff/discard must be importable
         # on machines that have not configured an LLM key. Only cmd_run
@@ -202,15 +283,138 @@ class TestImports(unittest.TestCase):
             self.assertIn("m.content", block)
 
     def test_adopt_and_discard_check_run_owner(self):
-        import inspect
-
         import controller
-        adopt_source = inspect.getsource(controller.adopt_run)
-        discard_source = inspect.getsource(controller.discard_run)
-        self.assertIn("_run_is_owned_by", adopt_source)
-        self.assertIn("_run_is_owned_by", discard_source)
-        self.assertIn("r.user_id = %s", adopt_source)
-        self.assertIn("r.user_id = %s", discard_source)
+
+        fake = _FakeControllerConn(owner="u_other")
+        original = controller._connect
+        controller._connect = lambda *a, **kw: fake
+        try:
+            result = controller.adopt_run(
+                "00000000-0000-0000-0000-000000000000",
+                user_id="u_test",
+            )
+            self.assertEqual(result.adopted, 0)
+            self.assertTrue(result.errors)
+            with self.assertRaises(PermissionError):
+                controller.discard_run(
+                    "00000000-0000-0000-0000-000000000000",
+                    user_id="u_test",
+                )
+        finally:
+            controller._connect = original
+
+        updates = [sql for sql, _ in fake.calls if "update memory.dream_proposals" in sql]
+        self.assertEqual(updates, [])
+
+    def test_adopt_allows_nullable_owner_only_with_explicit_legacy_admin(self):
+        import controller
+
+        fake = _FakeControllerConn(owner=None)
+        original = controller._connect
+        controller._connect = lambda *a, **kw: fake
+        try:
+            blocked = controller.adopt_run(
+                "00000000-0000-0000-0000-000000000000",
+                user_id="u_test",
+            )
+            self.assertTrue(blocked.errors)
+            allowed = controller.adopt_run(
+                "00000000-0000-0000-0000-000000000000",
+                user_id="u_test",
+                allow_legacy_admin=True,
+            )
+            self.assertEqual(allowed.errors, [])
+        finally:
+            controller._connect = original
+
+    def test_adopt_subset_casts_proposal_ids_to_uuid_array(self):
+        import controller
+
+        fake = _FakeControllerConn(owner="u_test")
+        original = controller._connect
+        controller._connect = lambda *a, **kw: fake
+        try:
+            result = controller.adopt_run(
+                "00000000-0000-0000-0000-000000000000",
+                proposal_ids=["11111111-1111-1111-1111-111111111111"],
+                user_id="u_test",
+            )
+            self.assertEqual(result.errors, [])
+        finally:
+            controller._connect = original
+
+        self.assertTrue(any("ANY(%s::uuid[])" in sql for sql, _ in fake.calls))
+
+    def test_legacy_admin_keeps_run_open_when_other_proposals_remain(self):
+        import controller
+
+        fake = _FakeControllerConn(owner=None, pending=True)
+        original = controller._connect
+        controller._connect = lambda *a, **kw: fake
+        try:
+            result = controller.adopt_run(
+                "00000000-0000-0000-0000-000000000000",
+                user_id="u_test",
+                allow_legacy_admin=True,
+            )
+            self.assertEqual(result.errors, [])
+            controller.discard_run(
+                "00000000-0000-0000-0000-000000000000",
+                user_id="u_test",
+                allow_legacy_admin=True,
+            )
+        finally:
+            controller._connect = original
+
+        self.assertFalse(any("set status = 'completed'" in sql for sql, _ in fake.calls))
+        self.assertFalse(any("set status = 'discarded'" in sql for sql, _ in fake.calls))
+        self.assertTrue(any("adopted_count = adopted_count + %s" in sql for sql, _ in fake.calls))
+
+    def test_synthesizer_invalid_json_error_does_not_include_response_preview(self):
+        from synthesizer import parse_response
+
+        secret_text = "typed memory secret should not leak"
+        with self.assertRaises(RuntimeError) as ctx:
+            parse_response("{not json " + secret_text)
+        message = str(ctx.exception)
+        self.assertIn("response_sha256=", message)
+        self.assertNotIn(secret_text, message)
+
+    def test_adopt_confirmation_eof_returns_clear_error(self):
+        import dream
+
+        args = SimpleNamespace(
+            user_id=None,
+            run_id="00000000-0000-0000-0000-000000000000",
+            yes=False,
+            database_url=None,
+            min_confidence=0.0,
+            actor_id=None,
+            allow_legacy_admin=False,
+        )
+        with mock.patch.object(dream.controller, "pending_proposals_count", return_value=1):
+            with mock.patch("builtins.input", side_effect=EOFError):
+                with mock.patch("sys.stdout", new=io.StringIO()) as stdout:
+                    exit_code = dream.cmd_adopt(args)
+        self.assertEqual(exit_code, 1)
+        self.assertIn("confirmation required", stdout.getvalue())
+
+    def test_discard_confirmation_eof_returns_clear_error(self):
+        import dream
+
+        args = SimpleNamespace(
+            user_id=None,
+            run_id="00000000-0000-0000-0000-000000000000",
+            yes=False,
+            database_url=None,
+            allow_legacy_admin=False,
+        )
+        with mock.patch.object(dream.controller, "pending_proposals_count", return_value=1):
+            with mock.patch("builtins.input", side_effect=EOFError):
+                with mock.patch("sys.stdout", new=io.StringIO()) as stdout:
+                    exit_code = dream.cmd_discard(args)
+        self.assertEqual(exit_code, 1)
+        self.assertIn("confirmation required", stdout.getvalue())
 
     def test_dream_wrapper_processes_final_env_line_without_newline(self):
         script = (DREAM_DIR / "dream.sh").read_text(encoding="utf-8")
@@ -510,6 +714,15 @@ class TestSchemaAdditions(unittest.TestCase):
                 self.text,
             )
             self.assertIn(f"{table}_service_all", self.text)
+
+    def test_service_role_requires_trusted_database_identity(self):
+        start = self.text.index("create or replace function memory.is_service_role")
+        end = self.text.index("-- 4a. typed_memory RLS", start)
+        helper_block = self.text[start:end]
+        self.assertIn("memory.has_trusted_service_identity()", helper_block)
+        self.assertIn("current_user", self.text)
+        self.assertIn("session_user", self.text)
+        self.assertIn("pg_has_role", self.text)
 
     def test_dream_proposals_policy_checks_run_and_memory_owner(self):
         start = self.text.index("create policy dream_proposals_user_select")

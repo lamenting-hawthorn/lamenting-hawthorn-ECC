@@ -95,7 +95,14 @@ const dbIdx = args.indexOf("--db");
 const resolvedDb = dbIdx >= 0 && args[dbIdx + 1] ? args[dbIdx + 1] : db;
 if (!fs.existsSync(resolvedDb)) { console.log("Telemetry not set up: " + resolvedDb + " not found. No hooks have recorded invocations yet."); process.exit(0); }
 const topIdx = args.indexOf("--top");
-const top = topIdx >= 0 ? parseInt(args[topIdx + 1], 10) || 20 : 20;
+let top = 20;
+if (topIdx >= 0) {
+  top = Number.parseInt(args[topIdx + 1], 10);
+  if (!Number.isInteger(top) || top <= 0) {
+    console.error("--top must be a positive integer");
+    process.exit(1);
+  }
+}
 const srcPath = path.join(resolveEccRoot(), "src");
 const pyEnv = {
   ...process.env,

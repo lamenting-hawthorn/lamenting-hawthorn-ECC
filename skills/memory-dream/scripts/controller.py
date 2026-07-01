@@ -241,11 +241,51 @@ def _run_is_owned_by(conn, run_id: str, user_id: str) -> bool:
     return row is not None
 
 
+def _legacy_admin_enabled(allow_legacy_admin: bool = False) -> bool:
+    return allow_legacy_admin
+
+
+def _run_is_authorized(
+    conn,
+    run_id: str,
+    user_id: str,
+    *,
+    allow_legacy_admin: bool = False,
+) -> bool:
+    row = conn.execute(
+        """
+        select user_id
+        from memory.dream_runs
+        where run_id = %s
+        """,
+        (run_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    owner = row["user_id"]
+    return owner == user_id or (owner is None and _legacy_admin_enabled(allow_legacy_admin))
+
+
+def _run_has_pending_proposals(conn, run_id: str) -> bool:
+    row = conn.execute(
+        """
+        select 1
+        from memory.dream_proposals
+        where run_id = %s
+          and reviewer_action is null
+        limit 1
+        """,
+        (run_id,),
+    ).fetchone()
+    return row is not None
+
+
 def discard_run(
     run_id: str,
     *,
     user_id: str | None = None,
     database_url: str | None = None,
+    allow_legacy_admin: bool = False,
 ) -> int:
     """Mark all unreviewed proposals in the run as ``rejected``.
 
@@ -253,11 +293,17 @@ def discard_run(
     marked rejected.
     """
     expected_user = _resolve_actor_user(user_id)
+    legacy_admin = _legacy_admin_enabled(allow_legacy_admin)
     with _connect(database_url) as conn:
         _set_session_context(conn, expected_user)
-        if not _run_is_owned_by(conn, run_id, expected_user):
+        if not _run_is_authorized(
+            conn,
+            run_id,
+            expected_user,
+            allow_legacy_admin=legacy_admin,
+        ):
             raise PermissionError(
-                f"run {run_id} is not owned by user_id={expected_user}"
+                f"run {run_id} is not authorized for user_id={expected_user}"
             )
         row = conn.execute(
             """
@@ -269,19 +315,26 @@ def discard_run(
               and exists (
                   select 1
                   from memory.dream_runs r
+                  join memory.typed_memory m on m.id = dream_proposals.row_id
                   where r.run_id = dream_proposals.run_id
-                    and r.user_id = %s
+                    and m.user_id = %s
+                    and (
+                        r.user_id = %s
+                        or (r.user_id is null and %s)
+                    )
               )
             returning id
             """,
-            (run_id, expected_user),
+            (run_id, expected_user, expected_user, legacy_admin),
         ).fetchall()
-        conn.execute(
-            "update memory.dream_runs set status = 'discarded', finished_at = now() "
-            "where run_id = %s and user_id = %s "
-            "and status not in ('discarded', 'failed')",
-            (run_id, expected_user),
-        )
+        if not _run_has_pending_proposals(conn, run_id):
+            conn.execute(
+                "update memory.dream_runs set status = 'discarded', finished_at = now() "
+                "where run_id = %s "
+                "and (user_id = %s or (user_id is null and %s)) "
+                "and status not in ('discarded', 'failed')",
+                (run_id, expected_user, legacy_admin),
+            )
         conn.commit()
         return len(row)
 
@@ -294,6 +347,7 @@ def adopt_run(
     actor_id: str | None = None,
     user_id: str | None = None,
     database_url: str | None = None,
+    allow_legacy_admin: bool = False,
 ) -> AdoptResult:
     """
     Apply a run's proposals in a single transaction. If anything
@@ -314,6 +368,7 @@ def adopt_run(
     """
     expected_user = _resolve_actor_user(user_id)
     actor = actor_id or expected_user
+    legacy_admin = _legacy_admin_enabled(allow_legacy_admin)
 
     adopted = 0
     rejected = 0
@@ -322,12 +377,17 @@ def adopt_run(
 
     with _connect(database_url) as conn:
         _set_session_context(conn, expected_user)
-        if not _run_is_owned_by(conn, run_id, expected_user):
+        if not _run_is_authorized(
+            conn,
+            run_id,
+            expected_user,
+            allow_legacy_admin=legacy_admin,
+        ):
             return AdoptResult(
                 adopted=0,
                 rejected=0,
                 skipped=0,
-                errors=[f"run {run_id} is not owned by user_id={expected_user}"],
+                errors=[f"run {run_id} is not authorized for user_id={expected_user}"],
             )
         try:
             with conn.transaction():
@@ -340,17 +400,21 @@ def adopt_run(
                         from memory.dream_proposals p
                         join memory.typed_memory m on m.id = p.row_id
                         where p.run_id = %s
-                          and p.id = ANY(%s)
+                          and p.id = ANY(%s::uuid[])
+                          and m.user_id = %s
                           and p.reviewer_action is null
                           and exists (
                               select 1
                               from memory.dream_runs r
                               where r.run_id = p.run_id
-                                and r.user_id = %s
+                                and (
+                                    r.user_id = %s
+                                    or (r.user_id is null and %s)
+                                )
                           )
                         for update
                         """,
-                        (run_id, pid_list, expected_user),
+                        (run_id, pid_list, expected_user, expected_user, legacy_admin),
                     ).fetchall()
                 else:
                     proposals = conn.execute(
@@ -359,16 +423,20 @@ def adopt_run(
                         from memory.dream_proposals p
                         join memory.typed_memory m on m.id = p.row_id
                         where p.run_id = %s
+                          and m.user_id = %s
                           and p.reviewer_action is null
                           and exists (
                               select 1
                               from memory.dream_runs r
                               where r.run_id = p.run_id
-                                and r.user_id = %s
+                                and (
+                                    r.user_id = %s
+                                    or (r.user_id is null and %s)
+                                )
                           )
                         for update
                         """,
-                        (run_id, expected_user),
+                        (run_id, expected_user, expected_user, legacy_admin),
                     ).fetchall()
 
                 for prop in proposals:
@@ -434,18 +502,30 @@ def adopt_run(
                 # count of proposals that did NOT execute an apply
                 # helper (low confidence or unknown action); it is a
                 # strict subset of ``rejected_count``.
-                conn.execute(
-                    """
-                    update memory.dream_runs
-                    set status = 'completed',
-                        finished_at = now(),
-                        adopted_count = %s,
-                        rejected_count = %s,
-                        skipped_count = %s
-                    where run_id = %s
-                    """,
-                    (adopted, rejected, skipped, run_id),
-                )
+                if _run_has_pending_proposals(conn, run_id):
+                    conn.execute(
+                        """
+                        update memory.dream_runs
+                        set adopted_count = adopted_count + %s,
+                            rejected_count = rejected_count + %s,
+                            skipped_count = skipped_count + %s
+                        where run_id = %s
+                        """,
+                        (adopted, rejected, skipped, run_id),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        update memory.dream_runs
+                        set status = 'completed',
+                            finished_at = now(),
+                            adopted_count = adopted_count + %s,
+                            rejected_count = rejected_count + %s,
+                            skipped_count = skipped_count + %s
+                        where run_id = %s
+                        """,
+                        (adopted, rejected, skipped, run_id),
+                    )
                 return AdoptResult(adopted=adopted, rejected=rejected, skipped=skipped, errors=errors)
         except Exception as exc:
             message = str(exc)

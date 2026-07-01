@@ -33,7 +33,7 @@ Linux, and Windows.
 
 ```bash
 ECC_ROOT="${CLAUDE_PLUGIN_ROOT:-$(node -e "var r=(()=>{var e=process.env.ECC_ROOT;if(e&&e.trim())return e.trim();var p=require('path'),f=require('fs'),h=require('os').homedir(),d=p.join(h,'.claude'),q=p.join('scripts','record_invocation.py');if(f.existsSync(p.join(d,q)))return d;for(var s of [['ecc'],['ecc@ecc'],['marketplaces','ecc'],['everything-claude-code'],['everything-claude-code@everything-claude-code'],['marketplaces','everything-claude-code']]){var l=p.join(d,'plugins',...s);if(f.existsSync(p.join(l,q)))return l}try{for(var g of ['ecc','everything-claude-code']){var b=p.join(d,'plugins','cache',g);for(var o of f.readdirSync(b,{withFileTypes:true})){if(!o.isDirectory())continue;for(var v of f.readdirSync(p.join(b,o.name),{withFileTypes:true})){if(!v.isDirectory())continue;var c=p.join(b,o.name,v.name);if(f.existsSync(p.join(c,q)))return c}}}}catch(x){}return d})();console.log(r)")}"
-START_MS=$(python3 -c "import time; print(int(time.time()*1000))")
+START_MS=$(node -e "process.stdout.write(String(Date.now()))")
 node -e '
 const fs=require("fs"),os=require("os"),path=require("path");
 const f=path.join(os.homedir(),".claude","metrics","costs.jsonl");
@@ -58,16 +58,20 @@ console.log("\n=== Last 7 days ===");
 const days=new Map();for(const r of latest){const k=day(r);days.set(k,(days.get(k)||0)+cost(r));}
 [...days.entries()].sort((a,b)=>b[0]<a[0]?-1:1).slice(0,7).forEach(([k,v])=>console.log(k+"  "+f4(v)));
 '
-END_MS=$(python3 -c "import time; print(int(time.time()*1000))")
+REPORT_STATUS=$?
+END_MS=$(node -e "process.stdout.write(String(Date.now()))")
 DURATION=$((END_MS - START_MS))
-python3 "$ECC_ROOT/scripts/record_invocation.py" --name cost-report --kind command --duration-ms "$DURATION" --success 1 || true
+SUCCESS=0
+if [ "$REPORT_STATUS" -eq 0 ]; then SUCCESS=1; fi
+node -e 'const {spawnSync}=require("child_process");const path=require("path");const root=process.argv[1],duration=process.argv[2],success=process.argv[3];const probes=process.platform==="win32"?[{command:"py",prefix:["-3"]},{command:"python",prefix:[]},{command:"python3",prefix:[]}]:[{command:"python3",prefix:[]},{command:"python",prefix:[]},{command:"py",prefix:["-3"]}];for(const probe of probes){const result=spawnSync(probe.command,[...probe.prefix,path.join(root,"scripts","record_invocation.py"),"--name","cost-report","--kind","command","--duration-ms",duration,"--success",success],{stdio:"ignore"});if(result.status===0)process.exit(0);if(result.error&&result.error.code==="ENOENT")continue;process.exit(result.status||1)}' "$ECC_ROOT" "$DURATION" "$SUCCESS" || true
+exit "$REPORT_STATUS"
 ```
 
 ## CSV export (`/cost-report csv`)
 
 ```bash
 ECC_ROOT="${CLAUDE_PLUGIN_ROOT:-$(node -e "var r=(()=>{var e=process.env.ECC_ROOT;if(e&&e.trim())return e.trim();var p=require('path'),f=require('fs'),h=require('os').homedir(),d=p.join(h,'.claude'),q=p.join('scripts','record_invocation.py');if(f.existsSync(p.join(d,q)))return d;for(var s of [['ecc'],['ecc@ecc'],['marketplaces','ecc'],['everything-claude-code'],['everything-claude-code@everything-claude-code'],['marketplaces','everything-claude-code']]){var l=p.join(d,'plugins',...s);if(f.existsSync(p.join(l,q)))return l}try{for(var g of ['ecc','everything-claude-code']){var b=p.join(d,'plugins','cache',g);for(var o of f.readdirSync(b,{withFileTypes:true})){if(!o.isDirectory())continue;for(var v of f.readdirSync(p.join(b,o.name),{withFileTypes:true})){if(!v.isDirectory())continue;var c=p.join(b,o.name,v.name);if(f.existsSync(p.join(c,q)))return c}}}}catch(x){}return d})();console.log(r)")}"
-START_MS=$(python3 -c "import time; print(int(time.time()*1000))")
+START_MS=$(node -e "process.stdout.write(String(Date.now()))")
 node -e '
 const fs=require("fs"),os=require("os"),path=require("path");
 const f=path.join(os.homedir(),".claude","metrics","costs.jsonl");
@@ -76,9 +80,13 @@ const rows=fs.readFileSync(f,"utf8").split(/\r?\n/).filter(Boolean).map(l=>{try{
 console.log("timestamp,session_id,model,input_tokens,output_tokens,cache_write_tokens,cache_read_tokens,estimated_cost_usd");
 for(const r of rows)console.log([r.timestamp,r.session_id,r.model,r.input_tokens,r.output_tokens,r.cache_write_tokens,r.cache_read_tokens,r.estimated_cost_usd].join(","));
 '
-END_MS=$(python3 -c "import time; print(int(time.time()*1000))")
+REPORT_STATUS=$?
+END_MS=$(node -e "process.stdout.write(String(Date.now()))")
 DURATION=$((END_MS - START_MS))
-python3 "$ECC_ROOT/scripts/record_invocation.py" --name cost-report --kind command --duration-ms "$DURATION" --success 1 || true
+SUCCESS=0
+if [ "$REPORT_STATUS" -eq 0 ]; then SUCCESS=1; fi
+node -e 'const {spawnSync}=require("child_process");const path=require("path");const root=process.argv[1],duration=process.argv[2],success=process.argv[3];const probes=process.platform==="win32"?[{command:"py",prefix:["-3"]},{command:"python",prefix:[]},{command:"python3",prefix:[]}]:[{command:"python3",prefix:[]},{command:"python",prefix:[]},{command:"py",prefix:["-3"]}];for(const probe of probes){const result=spawnSync(probe.command,[...probe.prefix,path.join(root,"scripts","record_invocation.py"),"--name","cost-report","--kind","command","--duration-ms",duration,"--success",success],{stdio:"ignore"});if(result.status===0)process.exit(0);if(result.error&&result.error.code==="ENOENT")continue;process.exit(result.status||1)}' "$ECC_ROOT" "$DURATION" "$SUCCESS" || true
+exit "$REPORT_STATUS"
 ```
 
 ## Report format
