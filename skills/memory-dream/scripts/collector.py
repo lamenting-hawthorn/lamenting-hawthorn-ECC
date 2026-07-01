@@ -74,6 +74,11 @@ def _connect(database_url: str | None = None):
     return psycopg.connect(url, row_factory=dict_row)
 
 
+def _set_session_context(conn, user_id: str) -> None:
+    conn.execute("select set_config('app.current_role', 'service', false)")
+    conn.execute("select set_config('app.current_user', %s, false)", (user_id,))
+
+
 def _extract_text(payload) -> str:
     """Pull a textual preview from an event payload jsonb.
 
@@ -147,6 +152,7 @@ def collect_activity(
     cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)  # noqa: UP017
 
     with _connect(database_url) as conn:
+        _set_session_context(conn, user_id)
         # 1. Get the most recent N sessions that have at least one
         #    event with extractable user text.
         session_rows = conn.execute(

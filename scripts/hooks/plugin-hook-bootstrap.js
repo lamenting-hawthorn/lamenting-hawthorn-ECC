@@ -109,6 +109,10 @@ function findShellBinary() {
 
 function findBashBinary() {
   if (_cachedBash !== undefined) return _cachedBash;
+  if (process.env.ECC_HOOK_BOOTSTRAP_DISABLE_BASH === '1') {
+    _cachedBash = null;
+    return null;
+  }
 
   const candidates = [];
   if (process.env.BASH && process.env.BASH.trim() && !isPowerShellBin(process.env.BASH.trim())) {

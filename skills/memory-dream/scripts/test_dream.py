@@ -201,6 +201,17 @@ class TestImports(unittest.TestCase):
         for block in select_blocks[:2]:
             self.assertIn("m.content", block)
 
+    def test_adopt_and_discard_check_run_owner(self):
+        import inspect
+
+        import controller
+        adopt_source = inspect.getsource(controller.adopt_run)
+        discard_source = inspect.getsource(controller.discard_run)
+        self.assertIn("_run_is_owned_by", adopt_source)
+        self.assertIn("_run_is_owned_by", discard_source)
+        self.assertIn("r.user_id = %s", adopt_source)
+        self.assertIn("r.user_id = %s", discard_source)
+
     def test_dream_wrapper_processes_final_env_line_without_newline(self):
         script = (DREAM_DIR / "dream.sh").read_text(encoding="utf-8")
         self.assertIn('read -r key value || [[ -n "${key:-}" ]]', script)
@@ -423,7 +434,9 @@ class TestDiffMarkdown(unittest.TestCase):
         if not os.environ.get("DATABASE_URL") and not os.environ.get("DREAM_TEST_DB"):
             self.skipTest("no DATABASE_URL set; diff.py requires live DB")
         from diff import generate_diff_markdown
-        md = generate_diff_markdown("nonexistent-run-id-xxxxxxxxxxxx")
+        md = generate_diff_markdown(
+            "nonexistent-run-id-xxxxxxxxxxxx", user_id="u_test",
+        )
         self.assertIn("Run not found", md)
         self.assertIn("nonexistent-run-id", md)
 
@@ -486,6 +499,39 @@ class TestSchemaAdditions(unittest.TestCase):
         # The dream_runs.user_id index for per-actor status queries.
         self.assertIn("idx_dream_runs_user", self.text)
 
+    def test_dream_tables_have_forced_rls(self):
+        for table in ("dream_runs", "dream_proposals"):
+            self.assertIn(
+                f"alter table memory.{table} enable row level security",
+                self.text,
+            )
+            self.assertIn(
+                f"alter table memory.{table} force row level security",
+                self.text,
+            )
+            self.assertIn(f"{table}_service_all", self.text)
+
+    def test_dream_proposals_policy_checks_run_and_memory_owner(self):
+        start = self.text.index("create policy dream_proposals_user_select")
+        end = self.text.index("create policy dream_proposals_user_insert", start)
+        policy = self.text[start:end]
+        self.assertIn("from memory.dream_runs r", policy)
+        self.assertIn("join memory.typed_memory tm", policy)
+        self.assertIn("r.user_id = memory.get_current_user_id()", policy)
+        self.assertIn("tm.user_id = memory.get_current_user_id()", policy)
+
+    def test_memory_edges_authorize_by_endpoints(self):
+        start = self.text.index("create policy edge_select")
+        end = self.text.index("create policy edge_service_all", start)
+        policy = self.text[start:end]
+        self.assertIn("source_memory", policy)
+        self.assertIn("target_memory", policy)
+        self.assertIn("memory_edges.source_id", policy)
+        self.assertIn("memory_edges.target_id", policy)
+        self.assertNotIn("metadata->>'memory_id'", policy)
+        self.assertIn("create policy edge_service_all", self.text)
+        self.assertIn("for all", self.text[self.text.index("create policy edge_service_all"):])
+
 
 class TestParserSQL(unittest.TestCase):
     """Verify the parser SQL starts with `select` (not lint comments)."""
@@ -498,7 +544,7 @@ class TestParserSQL(unittest.TestCase):
         captured: dict = {}
 
         class _FakeConn:
-            def execute(self, sql, params):
+            def execute(self, sql, params=None):
                 captured["sql"] = sql
                 captured["params"] = params
                 class _R:

@@ -32,7 +32,7 @@ Linux, and Windows.
 ## Report
 
 ```bash
-python3 scripts/record_invocation.py --name cost-report --kind command --duration-ms 0 --success 1 || true
+ECC_ROOT="${CLAUDE_PLUGIN_ROOT:-$(node -e "var r=(()=>{var e=process.env.ECC_ROOT;if(e&&e.trim())return e.trim();var p=require('path'),f=require('fs'),h=require('os').homedir(),d=p.join(h,'.claude'),q=p.join('scripts','record_invocation.py');if(f.existsSync(p.join(d,q)))return d;for(var s of [['ecc'],['ecc@ecc'],['marketplaces','ecc'],['everything-claude-code'],['everything-claude-code@everything-claude-code'],['marketplaces','everything-claude-code']]){var l=p.join(d,'plugins',...s);if(f.existsSync(p.join(l,q)))return l}try{for(var g of ['ecc','everything-claude-code']){var b=p.join(d,'plugins','cache',g);for(var o of f.readdirSync(b,{withFileTypes:true})){if(!o.isDirectory())continue;for(var v of f.readdirSync(p.join(b,o.name),{withFileTypes:true})){if(!v.isDirectory())continue;var c=p.join(b,o.name,v.name);if(f.existsSync(p.join(c,q)))return c}}}}catch(x){}return d})();console.log(r)")}"
 START_MS=$(python3 -c "import time; print(int(time.time()*1000))")
 node -e '
 const fs=require("fs"),os=require("os"),path=require("path");
@@ -60,13 +60,13 @@ const days=new Map();for(const r of latest){const k=day(r);days.set(k,(days.get(
 '
 END_MS=$(python3 -c "import time; print(int(time.time()*1000))")
 DURATION=$((END_MS - START_MS))
-python3 scripts/record_invocation.py --name cost-report --kind command --duration-ms "$DURATION" --success 1 || true
+python3 "$ECC_ROOT/scripts/record_invocation.py" --name cost-report --kind command --duration-ms "$DURATION" --success 1 || true
 ```
 
 ## CSV export (`/cost-report csv`)
 
 ```bash
-python3 scripts/record_invocation.py --name cost-report --kind command --duration-ms 0 --success 1 || true
+ECC_ROOT="${CLAUDE_PLUGIN_ROOT:-$(node -e "var r=(()=>{var e=process.env.ECC_ROOT;if(e&&e.trim())return e.trim();var p=require('path'),f=require('fs'),h=require('os').homedir(),d=p.join(h,'.claude'),q=p.join('scripts','record_invocation.py');if(f.existsSync(p.join(d,q)))return d;for(var s of [['ecc'],['ecc@ecc'],['marketplaces','ecc'],['everything-claude-code'],['everything-claude-code@everything-claude-code'],['marketplaces','everything-claude-code']]){var l=p.join(d,'plugins',...s);if(f.existsSync(p.join(l,q)))return l}try{for(var g of ['ecc','everything-claude-code']){var b=p.join(d,'plugins','cache',g);for(var o of f.readdirSync(b,{withFileTypes:true})){if(!o.isDirectory())continue;for(var v of f.readdirSync(p.join(b,o.name),{withFileTypes:true})){if(!v.isDirectory())continue;var c=p.join(b,o.name,v.name);if(f.existsSync(p.join(c,q)))return c}}}}catch(x){}return d})();console.log(r)")}"
 START_MS=$(python3 -c "import time; print(int(time.time()*1000))")
 node -e '
 const fs=require("fs"),os=require("os"),path=require("path");
@@ -78,7 +78,7 @@ for(const r of rows)console.log([r.timestamp,r.session_id,r.model,r.input_tokens
 '
 END_MS=$(python3 -c "import time; print(int(time.time()*1000))")
 DURATION=$((END_MS - START_MS))
-python3 scripts/record_invocation.py --name cost-report --kind command --duration-ms "$DURATION" --success 1 || true
+python3 "$ECC_ROOT/scripts/record_invocation.py" --name cost-report --kind command --duration-ms "$DURATION" --success 1 || true
 ```
 
 ## Report format

@@ -125,6 +125,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help=f"Path to the telemetry database (default {DEFAULT_TELEMETRY_DB})",
     )
     parser.add_argument(
+        "--service-user-id",
+        default=os.environ.get("ECC_HYGIENE_USER_ID", "service:hygiene-worker"),
+        help="Session app.current_user for RLS-scoped cleanup",
+    )
+    parser.add_argument(
         "--log-level", default="INFO",
         choices=("DEBUG", "INFO", "WARNING", "ERROR"),
         help="Logging level (default INFO)",
@@ -185,7 +190,12 @@ def _db_error_class() -> type[BaseException]:
     return psycopg.Error
 
 
-def _run_pass(database_url: str, dry_run: bool) -> list[OperationResult]:
+def _run_pass(
+    database_url: str,
+    dry_run: bool,
+    *,
+    service_user_id: str = "service:hygiene-worker",
+) -> list[OperationResult]:
     """Run a single ``memory.run_hygiene_pass()`` call and parse the result.
 
     Returns an empty list in dry-run mode. Raises on database error
@@ -202,6 +212,8 @@ def _run_pass(database_url: str, dry_run: bool) -> list[OperationResult]:
     from psycopg.rows import dict_row
 
     with psycopg.connect(database_url, row_factory=dict_row) as conn:
+        conn.execute("select set_config('app.current_role', 'service', false)")
+        conn.execute("select set_config('app.current_user', %s, false)", (service_user_id,))
         rows = conn.execute("select * from memory.run_hygiene_pass()").fetchall()
 
     return [
@@ -270,7 +282,11 @@ def _execute_one_pass(
     """
     t0 = time.monotonic()
     try:
-        results = _run_pass(database_url, args.dry_run)
+        results = _run_pass(
+            database_url,
+            args.dry_run,
+            service_user_id=args.service_user_id,
+        )
     except (db_error_class, ImportError) as exc:
         _LOGGER.error("hygiene pass %d failed: %s", pass_count, exc)
         if args.once:

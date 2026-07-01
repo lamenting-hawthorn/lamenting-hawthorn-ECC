@@ -102,6 +102,3 @@ ecc2/target/
 assets/images/security/badrudi-exploit.mp4
 
 .aider*
-
-# Node modules (stray npm installs from tooling)
-node_modules/

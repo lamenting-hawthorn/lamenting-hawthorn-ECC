@@ -38,6 +38,7 @@ import json
 import logging
 import os
 import sys
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -386,22 +387,11 @@ def parse_response(response: str) -> SynthesisResult:
     try:
         data = json.loads(text)
     except json.JSONDecodeError as exc:
-        # Secure dump: tempfile + 0600 (owner-only) so a malformed LLM
-        # response containing PII is not world-readable.
-        import stat as _stat
-        import tempfile
-        fd, debug_path = tempfile.mkstemp(
-            prefix="dream_parse_error_", suffix=".txt", dir=None
-        )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(response)
-            os.chmod(debug_path, _stat.S_IRUSR | _stat.S_IWUSR)  # 0600
-        except Exception:
-            # If we can't even create a secure debug file, fail without dumping.
-            debug_path = "<secure-dump-failed>"
+        response_hash = hashlib.sha256(response.encode("utf-8")).hexdigest()[:16]
+        preview = text.replace("\n", " ")[:240]
         raise RuntimeError(
-            f"LLM returned invalid JSON: {exc}. Response saved to {debug_path}."
+            "LLM returned invalid JSON: "
+            f"{exc}. response_sha256={response_hash} preview={preview!r}"
         ) from exc
 
     if not isinstance(data, dict):

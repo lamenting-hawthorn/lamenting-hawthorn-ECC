@@ -16,7 +16,7 @@
 
   Cadence: `0 11 1,15 * *` (1st and 15th at 11:00).
 
-  Replace <PYTHON_PATH>, <REPO_ROOT>, <HOME>, and <USER> below before loading.
+  Replace <REPO_ROOT>, <HOME>, and <USER> below before loading.
 -->
 <plist version="1.0">
 <dict>
@@ -24,8 +24,7 @@
     <string>com.ecc.memory-dream</string>
     <key>ProgramArguments</key>
     <array>
-        <string>&lt;PYTHON_PATH&gt;</string>
-        <string>&lt;REPO_ROOT&gt;/skills/memory-dream/scripts/dream.py</string>
+        <string>&lt;REPO_ROOT&gt;/skills/memory-dream/scripts/dream.sh</string>
         <string>run</string>
         <string>--user-id</string>
         <string>owner:&lt;USER&gt;</string>

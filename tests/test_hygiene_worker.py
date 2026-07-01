@@ -86,6 +86,11 @@ class TestArgparse(unittest.TestCase):
         args = mod._parse_args(["--once"])
         self.assertIn("db_error_class", mod._execute_one_pass.__code__.co_varnames)
 
+    def test_service_user_id_default(self):
+        mod = _import_worker()
+        args = mod._parse_args([])
+        self.assertEqual(args.service_user_id, "service:hygiene-worker")
+
 
 class TestResolveUrls(unittest.TestCase):
     def test_resolve_database_url_from_args(self):
@@ -237,6 +242,7 @@ class TestEndToEndDryRun(unittest.TestCase):
             [sys.executable, str(SCRIPTS_DIR / "hygiene-worker.py"), *args],
             cwd=REPO_ROOT, capture_output=True, text=True,
             env={**os.environ, "DATABASE_URL": ""},  # force fallback path
+            check=False,
         )
 
     def test_help_exits_zero(self):
@@ -260,6 +266,18 @@ class TestSchemaHygieneSql(unittest.TestCase):
         self.assertNotIn("m.id::text", body)
         self.assertIn("e.source_id::uuid", body)
         self.assertIn("e.target_id::uuid", body)
+
+    def test_worker_sets_service_rls_context_before_cleanup(self):
+        source = (REPO_ROOT / "scripts" / "hygiene-worker.py").read_text(
+            encoding="utf-8",
+        )
+        role_idx = source.index("set_config('app.current_role', 'service', false)")
+        user_idx = source.index("set_config('app.current_user', %s, false)")
+        cleanup_idx = source.index(
+            'conn.execute("select * from memory.run_hygiene_pass()")',
+        )
+        self.assertLess(role_idx, cleanup_idx)
+        self.assertLess(user_idx, cleanup_idx)
 
 
 if __name__ == "__main__":

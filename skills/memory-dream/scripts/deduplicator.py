@@ -224,6 +224,8 @@ def find_semantic_dupes(
         by_bucket.setdefault((e.memory_type, e.category), []).append(e)
 
     with psycopg.connect(url, row_factory=dict_row) as conn:
+        conn.execute("select set_config('app.current_role', 'service', false)")
+        conn.execute("select set_config('app.current_user', %s, false)", (store.user_id,))
         for entry in store.entries:
             if entry.superseded_by:
                 continue

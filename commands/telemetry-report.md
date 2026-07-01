@@ -56,21 +56,71 @@ node -e '
 const { spawnSync } = require("child_process");
 const path = require("path");
 const fs = require("fs");
+function resolveEccRoot(){
+  const home = process.env.HOME || process.env.USERPROFILE;
+  const base = path.join(home, ".claude");
+  const marker = path.join("src", "telemetry", "cli.py");
+  const candidates = [
+    process.env.CLAUDE_PLUGIN_ROOT,
+    process.env.ECC_ROOT,
+    base,
+    path.join(base, "plugins", "ecc"),
+    path.join(base, "plugins", "ecc@ecc"),
+    path.join(base, "plugins", "everything-claude-code"),
+    path.join(base, "plugins", "everything-claude-code@everything-claude-code"),
+    path.join(base, "plugins", "marketplaces", "ecc"),
+    path.join(base, "plugins", "marketplaces", "everything-claude-code"),
+  ].filter(Boolean);
+  for (const c of candidates) if (fs.existsSync(path.join(c, marker))) return c;
+  for (const name of ["ecc", "everything-claude-code"]) {
+    const cache = path.join(base, "plugins", "cache", name);
+    try {
+      for (const a of fs.readdirSync(cache, { withFileTypes: true })) {
+        if (!a.isDirectory()) continue;
+        for (const b of fs.readdirSync(path.join(cache, a.name), { withFileTypes: true })) {
+          if (!b.isDirectory()) continue;
+          const c = path.join(cache, a.name, b.name);
+          if (fs.existsSync(path.join(c, marker))) return c;
+        }
+      }
+    } catch {}
+  }
+  return base;
+}
 const db = process.env.ECC_TELEMETRY_DB
   || path.join(process.env.HOME || process.env.USERPROFILE, ".ecc", "telemetry.db");
-if (!fs.existsSync(db)) { console.log("Telemetry not set up: " + db + " not found. No hooks have recorded invocations yet."); process.exit(0); }
-const args = process.argv.slice(2);
+const args = process.argv.slice(1).filter(arg => arg !== "--");
 const format = args.includes("json") ? "json" : "text";
+const dbIdx = args.indexOf("--db");
+const resolvedDb = dbIdx >= 0 && args[dbIdx + 1] ? args[dbIdx + 1] : db;
+if (!fs.existsSync(resolvedDb)) { console.log("Telemetry not set up: " + resolvedDb + " not found. No hooks have recorded invocations yet."); process.exit(0); }
 const topIdx = args.indexOf("--top");
 const top = topIdx >= 0 ? parseInt(args[topIdx + 1], 10) || 20 : 20;
-const srcPath = path.join(process.cwd(), "src");
+const srcPath = path.join(resolveEccRoot(), "src");
 const pyEnv = {
   ...process.env,
   PYTHONPATH: [srcPath, process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
 };
-const py = spawnSync("python3", [
+function choosePython(env) {
+  const probes = [
+    { command: "python3", prefix: [] },
+    { command: "python", prefix: [] },
+    { command: "py", prefix: ["-3"] },
+  ];
+  for (const probe of probes) {
+    const result = spawnSync(probe.command, [
+      ...probe.prefix, "-c", "import telemetry.cli",
+    ], { encoding: "utf8", env });
+    if (result.status === 0) return probe;
+  }
+  return null;
+}
+const launcher = choosePython(pyEnv);
+if (!launcher) { console.error("telemetry cli failed: no Python launcher could import telemetry.cli"); process.exit(1); }
+const py = spawnSync(launcher.command, [
+  ...launcher.prefix,
   "-m", "telemetry.cli", "report",
-  "--db", db, "--format", format, "--top", String(top),
+  "--db", resolvedDb, "--format", format, "--top", String(top),
 ], { encoding: "utf8", env: pyEnv });
 if (py.status !== 0) { console.error(py.stderr || "telemetry cli failed"); process.exit(py.status || 1); }
 process.stdout.write(py.stdout);

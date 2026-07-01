@@ -217,7 +217,7 @@ def _row_to_event(row: tuple) -> Event:
     used to generate ``_SELECT_SQL``); the ``_row_to_event`` order
     intentionally uses the same list via destructuring.
     """
-    values = dict(zip(_EVENT_COLUMNS, row))
+    values = dict(zip(_EVENT_COLUMNS, row, strict=True))
     return Event(
         name=values["name"],
         kind=EventKind(values["kind"]),
@@ -321,13 +321,12 @@ class TelemetryCollector:
         self._batch = []
         try:
             self.store.insert_many(batch)
-        except Exception as exc:
+        except Exception:
             # Persistence failure must not break the calling skill.
             # Drop the batch (rather than buffer it forever) so the
             # store does not grow unbounded; log loudly so it shows
             # up in operator dashboards.
-            _LOGGER.error("telemetry flush dropped %d event(s): %s",
-                          len(batch), exc)
+            _LOGGER.exception("telemetry flush dropped %d event(s)", len(batch))
 
 
 def default_db_path() -> Path:

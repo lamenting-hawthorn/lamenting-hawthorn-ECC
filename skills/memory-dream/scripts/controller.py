@@ -55,6 +55,12 @@ def _connect(database_url: str | None = None):
     return psycopg.connect(url, row_factory=dict_row)
 
 
+def _set_session_context(conn, user_id: str | None = None) -> None:
+    conn.execute("select set_config('app.current_role', 'service', false)")
+    if user_id:
+        conn.execute("select set_config('app.current_user', %s, false)", (user_id,))
+
+
 # ---------------------------------------------------------------------------
 # Run lifecycle
 # ---------------------------------------------------------------------------
@@ -79,6 +85,7 @@ def stage_proposals(
     valid_ids = {e.row_id for e in store.entries}
 
     with _connect(database_url) as conn:
+        _set_session_context(conn, store.user_id)
         staged_by_row: dict[str, str] = {}
         with conn.transaction():
             for p in result.proposals:
@@ -144,6 +151,7 @@ def latest_run(
     unchanged from before.
     """
     with _connect(database_url) as conn:
+        _set_session_context(conn, user_id)
         params: list = []
         clauses: list[str] = []
         if status_filter:
@@ -169,10 +177,12 @@ def finish_run(
     proposals_count: int = 0,
     summary: str | None = None,
     error_message: str | None = None,
+    user_id: str | None = None,
     database_url: str | None = None,
 ) -> None:
     """Mark a dream_runs row finished (completed / failed / discarded)."""
     with _connect(database_url) as conn:
+        _set_session_context(conn, user_id)
         conn.execute(
             """
             update memory.dream_runs
@@ -214,13 +224,41 @@ class AdoptResult:
     errors: list[str]
 
 
-def discard_run(run_id: str, *, database_url: str | None = None) -> int:
+def _resolve_actor_user(user_id: str | None = None) -> str:
+    return user_id or os.environ.get("ACTOR_ID", "u_owner")
+
+
+def _run_is_owned_by(conn, run_id: str, user_id: str) -> bool:
+    row = conn.execute(
+        """
+        select 1
+        from memory.dream_runs
+        where run_id = %s
+          and user_id = %s
+        """,
+        (run_id, user_id),
+    ).fetchone()
+    return row is not None
+
+
+def discard_run(
+    run_id: str,
+    *,
+    user_id: str | None = None,
+    database_url: str | None = None,
+) -> int:
     """Mark all unreviewed proposals in the run as ``rejected``.
 
     Does not touch typed_memory. Returns the count of proposals
     marked rejected.
     """
+    expected_user = _resolve_actor_user(user_id)
     with _connect(database_url) as conn:
+        _set_session_context(conn, expected_user)
+        if not _run_is_owned_by(conn, run_id, expected_user):
+            raise PermissionError(
+                f"run {run_id} is not owned by user_id={expected_user}"
+            )
         row = conn.execute(
             """
             update memory.dream_proposals
@@ -228,14 +266,21 @@ def discard_run(run_id: str, *, database_url: str | None = None) -> int:
                 reviewed_at = now()
             where run_id = %s
               and reviewer_action is null
+              and exists (
+                  select 1
+                  from memory.dream_runs r
+                  where r.run_id = dream_proposals.run_id
+                    and r.user_id = %s
+              )
             returning id
             """,
-            (run_id,),
+            (run_id, expected_user),
         ).fetchall()
         conn.execute(
             "update memory.dream_runs set status = 'discarded', finished_at = now() "
-            "where run_id = %s and status not in ('discarded', 'failed')",
-            (run_id,),
+            "where run_id = %s and user_id = %s "
+            "and status not in ('discarded', 'failed')",
+            (run_id, expected_user),
         )
         conn.commit()
         return len(row)
@@ -247,6 +292,7 @@ def adopt_run(
     min_confidence: float = 0.0,
     proposal_ids: Iterable[str] | None = None,
     actor_id: str | None = None,
+    user_id: str | None = None,
     database_url: str | None = None,
 ) -> AdoptResult:
     """
@@ -263,8 +309,11 @@ def adopt_run(
                           are considered.
         actor_id:         The actor to record in memory.audit_log.
                           Defaults to ``$ACTOR_ID`` or ``"system:dream"``.
+        user_id:          The expected dream_runs.user_id owner. Defaults
+                          to ``$ACTOR_ID`` or ``"u_owner"``.
     """
-    actor = actor_id or os.environ.get("ACTOR_ID", "system:dream")
+    expected_user = _resolve_actor_user(user_id)
+    actor = actor_id or expected_user
 
     adopted = 0
     rejected = 0
@@ -272,6 +321,14 @@ def adopt_run(
     errors: list[str] = []
 
     with _connect(database_url) as conn:
+        _set_session_context(conn, expected_user)
+        if not _run_is_owned_by(conn, run_id, expected_user):
+            return AdoptResult(
+                adopted=0,
+                rejected=0,
+                skipped=0,
+                errors=[f"run {run_id} is not owned by user_id={expected_user}"],
+            )
         try:
             with conn.transaction():
                 # Lock the proposals we're about to apply.
@@ -285,9 +342,15 @@ def adopt_run(
                         where p.run_id = %s
                           and p.id = ANY(%s)
                           and p.reviewer_action is null
+                          and exists (
+                              select 1
+                              from memory.dream_runs r
+                              where r.run_id = p.run_id
+                                and r.user_id = %s
+                          )
                         for update
                         """,
-                        (run_id, pid_list),
+                        (run_id, pid_list, expected_user),
                     ).fetchall()
                 else:
                     proposals = conn.execute(
@@ -297,9 +360,15 @@ def adopt_run(
                         join memory.typed_memory m on m.id = p.row_id
                         where p.run_id = %s
                           and p.reviewer_action is null
+                          and exists (
+                              select 1
+                              from memory.dream_runs r
+                              where r.run_id = p.run_id
+                                and r.user_id = %s
+                          )
                         for update
                         """,
-                        (run_id,),
+                        (run_id, expected_user),
                     ).fetchall()
 
                 for prop in proposals:
@@ -613,6 +682,7 @@ def status(*, user_id: str | None = None, database_url: str | None = None) -> di
     misattributed row from another actor.
     """
     with _connect(database_url) as conn:
+        _set_session_context(conn, user_id)
         if user_id is not None:
             store_count = conn.execute(
                 "select count(*) as n from memory.typed_memory "
@@ -656,14 +726,16 @@ def start_run(
     so status / latest_run queries can be scoped per actor.
     """
     run_id = str(uuid4())
+    owner = user_id or os.environ.get("ACTOR_ID", "u_owner")
     with _connect(database_url) as conn:
+        _set_session_context(conn, owner)
         conn.execute(
             """
             insert into memory.dream_runs
                 (run_id, user_id, started_at, model, instructions, status)
             values (%s, %s, now(), %s, %s, 'in_progress')
             """,
-            (run_id, user_id, model, instructions or ""),
+            (run_id, owner, model, instructions or ""),
         )
         conn.commit()
     return run_id
@@ -683,6 +755,7 @@ def record_proposals(
     """
     if not proposals:
         with _connect(database_url) as conn:
+            _set_session_context(conn)
             conn.execute(
                 """
                 update memory.dream_runs
@@ -699,6 +772,7 @@ def record_proposals(
         return 0
 
     with _connect(database_url) as conn:
+        _set_session_context(conn)
         with conn.transaction():
             for p in proposals:
                 conn.execute(
@@ -737,10 +811,17 @@ def record_proposals(
     return len(proposals)
 
 
-def fail_run(run_id: str, error_message: str, *, database_url: str | None = None) -> None:
+def fail_run(
+    run_id: str,
+    error_message: str,
+    *,
+    user_id: str | None = None,
+    database_url: str | None = None,
+) -> None:
     """Mark a run as failed with the given error. Called when the
     synthesis pass raises."""
     with _connect(database_url) as conn:
+        _set_session_context(conn, user_id)
         conn.execute(
             """
             update memory.dream_runs
@@ -782,6 +863,7 @@ def pending_proposals_count(
         sql += " and m.user_id = %s"
         params.append(user_id)
     with _connect(database_url) as conn:
+        _set_session_context(conn, user_id)
         return int(conn.execute(sql, params).fetchone()["n"])
 
 
@@ -789,6 +871,7 @@ def list_proposals(
     run_id: str,
     *,
     include_reviewed: bool = False,
+    user_id: str | None = None,
     database_url: str | None = None,
 ) -> list[dict]:
     """Return all proposals for a run, optionally excluding already-reviewed ones."""
@@ -801,13 +884,19 @@ def list_proposals(
             m.memory_type, m.category, m.content, m.summary as row_summary
         from memory.dream_proposals p
         join memory.typed_memory m on m.id = p.row_id
+        join memory.dream_runs r on r.run_id = p.run_id
         where p.run_id = %s
     """
+    params: list = [run_id]
+    if user_id is not None:
+        sql += " and r.user_id = %s and m.user_id = %s"
+        params.extend([user_id, user_id])
     if not include_reviewed:
         sql += " and p.reviewer_action is null"
     sql += " order by p.created_at"
     with _connect(database_url) as conn:
-        return [dict(r) for r in conn.execute(sql, (run_id,)).fetchall()]
+        _set_session_context(conn, user_id)
+        return [dict(r) for r in conn.execute(sql, params).fetchall()]
 
 
 if __name__ == "__main__":

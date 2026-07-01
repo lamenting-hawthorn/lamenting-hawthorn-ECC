@@ -23,6 +23,7 @@ function test(name, fn) {
 const sessionsDoc = fs.readFileSync(path.join(__dirname, '..', '..', 'commands', 'sessions.md'), 'utf8');
 const skillHealthDoc = fs.readFileSync(path.join(__dirname, '..', '..', 'commands', 'skill-health.md'), 'utf8');
 const instinctStatusDoc = fs.readFileSync(path.join(__dirname, '..', '..', 'commands', 'instinct-status.md'), 'utf8');
+const telemetryReportDoc = fs.readFileSync(path.join(__dirname, '..', '..', 'commands', 'telemetry-report.md'), 'utf8');
 
 test('sessions command uses shared inline resolver in all node scripts', () => {
   assert.strictEqual((sessionsDoc.match(/const _r = /g) || []).length, 6);
@@ -55,6 +56,14 @@ test('inline resolver covers current and legacy marketplace plugin roots', () =>
   assert.ok(INLINE_RESOLVE.includes("'marketplaces','ecc'"));
   assert.ok(INLINE_RESOLVE.includes("'marketplaces','everything-claude-code'"));
   assert.ok(!INLINE_RESOLVE.includes('\\"'), 'Inline resolver should not require escaped double quotes');
+});
+
+test('telemetry-report resolver never falls back to the caller cwd', () => {
+  assert.ok(telemetryReportDoc.includes('return base;'));
+  assert.ok(
+    !telemetryReportDoc.includes('return process.cwd();'),
+    'telemetry-report must not add <caller cwd>/src to PYTHONPATH'
+  );
 });
 
 console.log(`Passed: ${passed}`);

@@ -93,6 +93,11 @@ def _connect(database_url: str | None = None):
     return psycopg.connect(url, row_factory=dict_row)
 
 
+def _set_session_context(conn, user_id: str) -> None:
+    conn.execute("select set_config('app.current_role', 'service', false)")
+    conn.execute("select set_config('app.current_user', %s, false)", (user_id,))
+
+
 def parse_typed_memory(
     *,
     user_id: str,
@@ -148,6 +153,7 @@ def parse_typed_memory(
     entries: list[MemoryEntry] = []
     total_chars = 0
     with _connect(database_url) as conn:
+        _set_session_context(conn, user_id)
         for i, row in enumerate(conn.execute(sql, params).fetchall()):
             text = (row.get("summary") or row.get("content") or "").strip()
             if not text:

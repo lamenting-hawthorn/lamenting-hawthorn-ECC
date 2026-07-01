@@ -172,7 +172,9 @@ def cmd_run(args) -> int:
             model=model,
         )
     except Exception as exc:  # noqa: BLE001 — intentional: route any failure to fail_run
-        controller.fail_run(run_id, str(exc), database_url=args.database_url)
+        controller.fail_run(
+            run_id, str(exc), user_id=user_id, database_url=args.database_url,
+        )
         print(f"\nERROR: Synthesis failed: {exc}")
         traceback.print_exc()
         return 2
@@ -194,10 +196,13 @@ def cmd_run(args) -> int:
             rows_scanned=store.entry_count,
             proposals_count=len(inserted_ids),
             summary=result.summary,
+            user_id=user_id,
             database_url=args.database_url,
         )
     except Exception as exc:  # noqa: BLE001 — intentional: route any failure to fail_run
-        controller.fail_run(run_id, str(exc), database_url=args.database_url)
+        controller.fail_run(
+            run_id, str(exc), user_id=user_id, database_url=args.database_url,
+        )
         print(f"\nERROR: Staging failed: {exc}")
         traceback.print_exc()
         return 2
@@ -212,7 +217,8 @@ def cmd_run(args) -> int:
 
 
 def cmd_status(args) -> int:
-    s = controller.status(database_url=args.database_url)
+    user_id = args.user_id or DEFAULT_ACTOR_ID
+    s = controller.status(user_id=user_id, database_url=args.database_url)
     print("Memory Dream Status")
     print("=" * 40)
     print(f"Store size:        {s['store_size']} live rows")
@@ -234,9 +240,11 @@ def cmd_status(args) -> int:
 
 
 def cmd_proposals(args) -> int:
+    user_id = args.user_id or DEFAULT_ACTOR_ID
     proposals = controller.list_proposals(
         args.run_id,
         include_reviewed=args.all,
+        user_id=user_id,
         database_url=args.database_url,
     )
     if not proposals:
@@ -262,7 +270,10 @@ def cmd_proposals(args) -> int:
 
 
 def cmd_diff(args) -> int:
-    md = diff.generate_diff_markdown(args.run_id, database_url=args.database_url)
+    user_id = args.user_id or DEFAULT_ACTOR_ID
+    md = diff.generate_diff_markdown(
+        args.run_id, user_id=user_id, database_url=args.database_url,
+    )
     if args.out:
         Path(args.out).write_text(md, encoding="utf-8")
         print(f"wrote {args.out} ({len(md)} chars)")
@@ -272,9 +283,10 @@ def cmd_diff(args) -> int:
 
 
 def cmd_adopt(args) -> int:
+    user_id = args.user_id or DEFAULT_ACTOR_ID
     if not args.yes:
         pending = controller.pending_proposals_count(
-            run_id=args.run_id, database_url=args.database_url,
+            run_id=args.run_id, user_id=user_id, database_url=args.database_url,
         )
         if pending == 0:
             print(f"no pending proposals for run_id={args.run_id}")
@@ -290,6 +302,7 @@ def cmd_adopt(args) -> int:
         args.run_id,
         min_confidence=args.min_confidence,
         actor_id=args.actor_id,
+        user_id=user_id,
         database_url=args.database_url,
     )
     print(f" Adopted {result.adopted}, rejected {result.rejected}, "
@@ -300,9 +313,10 @@ def cmd_adopt(args) -> int:
 
 
 def cmd_discard(args) -> int:
+    user_id = args.user_id or DEFAULT_ACTOR_ID
     if not args.yes:
         pending = controller.pending_proposals_count(
-            run_id=args.run_id, database_url=args.database_url,
+            run_id=args.run_id, user_id=user_id, database_url=args.database_url,
         )
         if pending == 0:
             print(f"no pending proposals for run_id={args.run_id}")
@@ -311,7 +325,13 @@ def cmd_discard(args) -> int:
         if resp != "y":
             print("Aborted.")
             return 1
-    n = controller.discard_run(args.run_id, database_url=args.database_url)
+    try:
+        n = controller.discard_run(
+            args.run_id, user_id=user_id, database_url=args.database_url,
+        )
+    except PermissionError as exc:
+        print(f"ERROR: {exc}")
+        return 1
     print(f" Discarded {n} proposal(s)")
     return 0
 
@@ -383,16 +403,19 @@ def main() -> int:
     p_run.set_defaults(func=cmd_run)
 
     p_status = sub.add_parser("status", help="Show store and run summary")
+    p_status.add_argument("--user-id", help=f"User to inspect (default: $ACTOR_ID or {DEFAULT_ACTOR_ID})")
     p_status.set_defaults(func=cmd_status)
 
     p_prop = sub.add_parser("proposals", help="List proposals for a run")
     p_prop.add_argument("run_id")
+    p_prop.add_argument("--user-id", help=f"Expected run owner (default: $ACTOR_ID or {DEFAULT_ACTOR_ID})")
     p_prop.add_argument("--all", action="store_true",
                         help="Include already-reviewed proposals")
     p_prop.set_defaults(func=cmd_proposals)
 
     p_diff = sub.add_parser("diff", help="Print diff markdown for a run")
     p_diff.add_argument("run_id")
+    p_diff.add_argument("--user-id", help=f"Expected run owner (default: $ACTOR_ID or {DEFAULT_ACTOR_ID})")
     p_diff.add_argument("--out", help="Write to file instead of stdout")
     p_diff.set_defaults(func=cmd_diff)
 
@@ -401,11 +424,13 @@ def main() -> int:
     p_adopt.add_argument("-y", "--yes", action="store_true")
     p_adopt.add_argument("--min-confidence", type=float, default=0.0)
     p_adopt.add_argument("--actor-id", help="Override actor for audit_log")
+    p_adopt.add_argument("--user-id", help=f"Expected run owner (default: $ACTOR_ID or {DEFAULT_ACTOR_ID})")
     p_adopt.set_defaults(func=cmd_adopt)
 
     p_disc = sub.add_parser("discard", help="Reject all pending proposals in a run")
     p_disc.add_argument("run_id")
     p_disc.add_argument("-y", "--yes", action="store_true")
+    p_disc.add_argument("--user-id", help=f"Expected run owner (default: $ACTOR_ID or {DEFAULT_ACTOR_ID})")
     p_disc.set_defaults(func=cmd_discard)
 
     p_runs = sub.add_parser("runs", help="List recent dream runs")

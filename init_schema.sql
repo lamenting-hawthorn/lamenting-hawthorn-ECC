@@ -442,24 +442,43 @@ create policy edge_select on memory.memory_edges
     for select
     using (
         exists (
-            select 1 from memory.typed_memory
-            where id = nullif(metadata->>'memory_id', '')::uuid
-            and (
-                user_id = memory.get_current_user_id()
+            select 1
+            from memory.typed_memory source_memory
+            join memory.typed_memory target_memory
+              on target_memory.id = case
+                  when memory_edges.target_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                  then memory_edges.target_id::uuid
+                  else null
+              end
+            where source_memory.id = case
+                  when memory_edges.source_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                  then memory_edges.source_id::uuid
+                  else null
+              end
+              and source_memory.user_id = target_memory.user_id
+              and (
+                source_memory.user_id = memory.get_current_user_id()
+                or target_memory.user_id = memory.get_current_user_id()
                 or (
-                    visibility in ('team', 'org')
-                    and org_id is not null
-                    and org_id = memory.get_current_org_id()
+                    source_memory.visibility in ('team', 'org', 'public')
+                    and target_memory.visibility in ('team', 'org', 'public')
+                    and source_memory.org_id is not null
+                    and source_memory.org_id = memory.get_current_org_id()
+                    and target_memory.org_id = source_memory.org_id
                 )
-                or visibility = 'public'
+                or (
+                    source_memory.visibility = 'public'
+                    and target_memory.visibility = 'public'
+                )
                 or memory.is_service_role()
-            )
+              )
         )
         or memory.is_service_role()
     );
 
-create policy edge_insert_service on memory.memory_edges
-    for insert
+create policy edge_service_all on memory.memory_edges
+    for all
+    using (memory.is_service_role())
     with check (memory.is_service_role());
 
 -- 4c. event_store.events RLS
@@ -602,6 +621,94 @@ create policy diagnostic_reports_update_approval on memory.diagnostic_reports
             org_id is not null
             and org_id = memory.get_current_org_id()
             and memory.get_current_role() in ('owner', 'admin')
+        )
+    );
+
+-- 4i. dream_runs RLS
+alter table memory.dream_runs enable row level security;
+alter table memory.dream_runs force row level security;
+
+create policy dream_runs_service_all on memory.dream_runs
+    for all
+    using (memory.is_service_role())
+    with check (memory.is_service_role());
+
+create policy dream_runs_user_select on memory.dream_runs
+    for select
+    using (
+        user_id = memory.get_current_user_id()
+    );
+
+create policy dream_runs_user_insert on memory.dream_runs
+    for insert
+    with check (
+        user_id = memory.get_current_user_id()
+    );
+
+create policy dream_runs_user_update on memory.dream_runs
+    for update
+    using (
+        user_id = memory.get_current_user_id()
+    )
+    with check (
+        user_id = memory.get_current_user_id()
+    );
+
+-- 4j. dream_proposals RLS
+alter table memory.dream_proposals enable row level security;
+alter table memory.dream_proposals force row level security;
+
+create policy dream_proposals_service_all on memory.dream_proposals
+    for all
+    using (memory.is_service_role())
+    with check (memory.is_service_role());
+
+create policy dream_proposals_user_select on memory.dream_proposals
+    for select
+    using (
+        exists (
+            select 1
+            from memory.dream_runs r
+            join memory.typed_memory tm on tm.id = dream_proposals.row_id
+            where r.run_id = dream_proposals.run_id
+              and r.user_id = memory.get_current_user_id()
+              and tm.user_id = memory.get_current_user_id()
+        )
+    );
+
+create policy dream_proposals_user_insert on memory.dream_proposals
+    for insert
+    with check (
+        exists (
+            select 1
+            from memory.dream_runs r
+            join memory.typed_memory tm on tm.id = dream_proposals.row_id
+            where r.run_id = dream_proposals.run_id
+              and r.user_id = memory.get_current_user_id()
+              and tm.user_id = memory.get_current_user_id()
+        )
+    );
+
+create policy dream_proposals_user_update on memory.dream_proposals
+    for update
+    using (
+        exists (
+            select 1
+            from memory.dream_runs r
+            join memory.typed_memory tm on tm.id = dream_proposals.row_id
+            where r.run_id = dream_proposals.run_id
+              and r.user_id = memory.get_current_user_id()
+              and tm.user_id = memory.get_current_user_id()
+        )
+    )
+    with check (
+        exists (
+            select 1
+            from memory.dream_runs r
+            join memory.typed_memory tm on tm.id = dream_proposals.row_id
+            where r.run_id = dream_proposals.run_id
+              and r.user_id = memory.get_current_user_id()
+              and tm.user_id = memory.get_current_user_id()
         )
     );
 

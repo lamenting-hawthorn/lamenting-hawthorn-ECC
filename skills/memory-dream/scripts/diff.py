@@ -30,6 +30,11 @@ def _connect(database_url: str | None = None):
     return psycopg.connect(url, row_factory=dict_row)
 
 
+def _set_session_context(conn, user_id: str) -> None:
+    conn.execute("select set_config('app.current_role', 'service', false)")
+    conn.execute("select set_config('app.current_user', %s, false)", (user_id,))
+
+
 def _truncate(text: str | None, n: int = 200) -> str:
     if not text:
         return ""
@@ -42,6 +47,7 @@ def _truncate(text: str | None, n: int = 200) -> str:
 def generate_diff_markdown(
     run_id: str,
     *,
+    user_id: str,
     database_url: str | None = None,
 ) -> str:
     """
@@ -53,6 +59,7 @@ def generate_diff_markdown(
       4. Adopt / discard footer
     """
     with _connect(database_url) as conn:
+        _set_session_context(conn, user_id)
         run = conn.execute(
             """
             select run_id, started_at, finished_at, model, status,
@@ -60,13 +67,19 @@ def generate_diff_markdown(
                    rejected_count, summary, instructions
             from memory.dream_runs
             where run_id = %s
+              and user_id = %s
             """,
-            (run_id,),
+            (run_id, user_id),
         ).fetchone()
         if run is None:
             return f"# Memory Dream — Diff\n\n**Run not found:** `{run_id}`\n"
 
-    proposals = list_proposals(run_id, include_reviewed=True, database_url=database_url)
+    proposals = list_proposals(
+        run_id,
+        include_reviewed=True,
+        user_id=user_id,
+        database_url=database_url,
+    )
 
     lines: list[str] = ["# Memory Dream — Diff Report\n"]
     lines.append(f"**Run:** `{run['run_id']}`")
@@ -172,10 +185,11 @@ def write_diff(
     run_id: str,
     path: str,
     *,
+    user_id: str,
     database_url: str | None = None,
 ) -> int:
     """Write the diff markdown to ``path``. Returns the byte count."""
-    md = generate_diff_markdown(run_id, database_url=database_url)
+    md = generate_diff_markdown(run_id, user_id=user_id, database_url=database_url)
     with open(path, "w", encoding="utf-8") as f:
         f.write(md)
     return len(md.encode("utf-8"))
@@ -184,11 +198,12 @@ def write_diff(
 if __name__ == "__main__":
     import sys
 
+    user_id = os.environ.get("ACTOR_ID", "u_owner")
     target = sys.argv[1] if len(sys.argv) > 1 else None
     if not target:
-        last = __import__("controller").latest_run()
+        last = __import__("controller").latest_run(user_id=user_id)
         if not last:
             print("no dream runs yet")
             sys.exit(0)
         target = last["run_id"]
-    print(generate_diff_markdown(target))
+    print(generate_diff_markdown(target, user_id=user_id))

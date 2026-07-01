@@ -364,14 +364,16 @@ process.exit(7);
       try {
         writeFile(root, path.join('scripts', 'hook.sh'), 'printf unreachable\n');
 
-        // Keep PowerShell on PATH so it is resolved as the shell, then strip
-        // bash candidates so the .sh fallback path hits the skip-warning branch.
+        // Keep PowerShell available as the shell while disabling the .sh bash
+        // fallback deterministically. Windows runners can resolve bash.exe from
+        // outside the PATH value this test controls.
         const result = run(['shell', path.join('scripts', 'hook.sh')], {
           root,
           input: 'raw-input',
           env: { BASH: '', PATH: process.env.SystemRoot
             ? `${process.env.SystemRoot}\\System32\\WindowsPowerShell\\v1.0;${process.env.SystemRoot}\\System32`
-            : '' },
+            : '',
+            ECC_HOOK_BOOTSTRAP_DISABLE_BASH: '1' },
         });
 
         assert.strictEqual(result.status, 0);
