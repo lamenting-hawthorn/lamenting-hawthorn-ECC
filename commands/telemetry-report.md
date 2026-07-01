@@ -63,10 +63,15 @@ const args = process.argv.slice(2);
 const format = args.includes("json") ? "json" : "text";
 const topIdx = args.indexOf("--top");
 const top = topIdx >= 0 ? parseInt(args[topIdx + 1], 10) || 20 : 20;
+const srcPath = path.join(process.cwd(), "src");
+const pyEnv = {
+  ...process.env,
+  PYTHONPATH: [srcPath, process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
+};
 const py = spawnSync("python3", [
   "-m", "telemetry.cli", "report",
   "--db", db, "--format", format, "--top", String(top),
-], { encoding: "utf8" });
+], { encoding: "utf8", env: pyEnv });
 if (py.status !== 0) { console.error(py.stderr || "telemetry cli failed"); process.exit(py.status || 1); }
 process.stdout.write(py.stdout);
 '
@@ -98,6 +103,6 @@ python3 -m telemetry.cli report --db ~/.ecc/telemetry.db --format json
 
 ## Why this exists
 
-The catalog has 273 skills. Without this report, you have no way to
+The catalog has 279 skills. Without this report, you have no way to
 know which are invoked, which are slow, which are silently broken, or
 which can be retired. This is the data plane for that decision.

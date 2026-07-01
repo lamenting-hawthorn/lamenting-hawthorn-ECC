@@ -144,18 +144,80 @@ class TestImports(unittest.TestCase):
         self.assertTrue(callable(write_diff))
 
     def test_dream_cli_imports(self):
-        # dream.py does `from _loadenv import load_api_key` at import time,
-        # which is fine because _loadenv never opens files at import. But
-        # dream.py also reads sys.argv, so we just import the module and
-        # don't call main().
+        # Non-LLM subcommands such as status/diff/discard must be importable
+        # on machines that have not configured an LLM key. Only cmd_run
+        # should force key loading.
         import importlib.util
-        spec = importlib.util.spec_from_file_location("dream", DREAM_DIR / "dream.py")
+        import os
+        import tempfile
+
+        old_env = {name: os.environ.get(name) for name in (
+            "LLM_API_KEY", "OPENAI_API_KEY", "NVIDIA_API_KEY", "ANTHROPIC_API_KEY",
+        )}
+        old_home = os.environ.get("HOME")
+        old_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmp:
+            for name in old_env:
+                os.environ.pop(name, None)
+            os.environ["HOME"] = tmp
+            os.chdir(tmp)
+            try:
+                spec = importlib.util.spec_from_file_location("dream", DREAM_DIR / "dream.py")
+                self.assertIsNotNone(spec)
+                self.assertIsNotNone(getattr(spec, "loader", None))
+                assert spec is not None and spec.loader is not None
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                self.assertTrue(hasattr(module, "main"))
+            finally:
+                os.chdir(old_cwd)
+                for name, value in old_env.items():
+                    if value is None:
+                        os.environ.pop(name, None)
+                    else:
+                        os.environ[name] = value
+                if old_home is None:
+                    os.environ.pop("HOME", None)
+                else:
+                    os.environ["HOME"] = old_home
+
+    def test_stage_proposals_uses_unique_row_upsert(self):
+        import inspect
+
+        import controller
+        source = inspect.getsource(controller.stage_proposals)
+        self.assertIn("on conflict (run_id, row_id)", source)
+        self.assertIn("update memory.dream_runs", source)
+
+    def test_adopt_run_selects_content_for_merge_audit(self):
+        import controller
+        source = Path(controller.__file__).read_text(encoding="utf-8")
+        select_blocks = [
+            block for block in source.split("for update")
+            if "from memory.dream_proposals p" in block
+            and "join memory.typed_memory m" in block
+        ]
+        self.assertTrue(select_blocks)
+        for block in select_blocks[:2]:
+            self.assertIn("m.content", block)
+
+    def test_dream_wrapper_processes_final_env_line_without_newline(self):
+        script = (DREAM_DIR / "dream.sh").read_text(encoding="utf-8")
+        self.assertIn('read -r key value || [[ -n "${key:-}" ]]', script)
+
+    def test_no_llm_paths_do_not_require_api_key(self):
+        import importlib.util
+        import inspect
+
+        spec = importlib.util.spec_from_file_location("dream_no_llm_contract", DREAM_DIR / "dream.py")
         self.assertIsNotNone(spec)
         self.assertIsNotNone(getattr(spec, "loader", None))
         assert spec is not None and spec.loader is not None
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        self.assertTrue(hasattr(module, "main"))
+        source = inspect.getsource(module.cmd_run)
+        self.assertLess(source.index("if args.dry_run"), source.index("load_api_key()"))
+        self.assertLess(source.index("if args.no_llm"), source.index("load_api_key()"))
 
 
 class TestParser(unittest.TestCase):

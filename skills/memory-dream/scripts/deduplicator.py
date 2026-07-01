@@ -1,9 +1,9 @@
 """
 deduplicator.py — Find duplicate and near-duplicate typed_memory rows.
 
-In hermes-dream the dedup is hash-based (case/whitespace normalized
-SHA-256) plus substring containment plus common-prefix detection,
-because the input is plain text. Here, the input is ``typed_memory``
+In file-staged memory systems, dedup is often hash-based
+(case/whitespace normalized SHA-256) plus substring containment plus
+common-prefix detection, because the input is plain text. Here, the input is ``typed_memory``
 rows that already carry a ``vector(1536)`` embedding, so we can do
 *real* semantic dedup:
 
@@ -27,9 +27,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-import psycopg
 from parser import MemoryEntry, ParsedStore
-from psycopg.rows import dict_row
 
 DEFAULT_DATABASE_URL = "postgresql:///agent_memory"
 
@@ -214,6 +212,9 @@ def find_semantic_dupes(
         return []
 
     url = database_url or os.environ.get("DATABASE_URL", DEFAULT_DATABASE_URL)
+    import psycopg
+    from psycopg.rows import dict_row
+
     pairs_seen: set[tuple[str, str]] = set()
     groups: list[DuplicateGroup] = []
 

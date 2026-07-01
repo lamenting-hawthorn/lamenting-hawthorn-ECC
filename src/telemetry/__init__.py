@@ -189,14 +189,21 @@ class SqliteEventStore:
         if not rows:
             return 0
         with self._lock:
-            self._conn.executemany(_INSERT_SQL, rows)
+            self._conn.execute("BEGIN")
+            try:
+                self._conn.executemany(_INSERT_SQL, rows)
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
         return len(rows)
 
     def iter_all(self) -> Iterator[Event]:
         with self._lock:
             cursor = self._conn.execute(_SELECT_SQL)
-            for row in cursor.fetchall():
-                yield _row_to_event(row)
+            rows = cursor.fetchall()
+        for row in rows:
+            yield _row_to_event(row)
 
     def close(self) -> None:
         with self._lock:
@@ -314,7 +321,7 @@ class TelemetryCollector:
         self._batch = []
         try:
             self.store.insert_many(batch)
-        except sqlite3.Error as exc:
+        except Exception as exc:
             # Persistence failure must not break the calling skill.
             # Drop the batch (rather than buffer it forever) so the
             # store does not grow unbounded; log loudly so it shows

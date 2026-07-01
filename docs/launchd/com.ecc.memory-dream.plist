@@ -1,32 +1,31 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  com.agent_architecture.dream.plist — biweekly batch memory curation.
+  com.ecc.memory-dream.plist — biweekly batch memory curation.
 
   Runs the memory-dream skill (skills/memory-dream/scripts/dream.py)
   on the 1st and 15th of each month at 11:00 local time. Produces a
   staging set in memory.dream_proposals; does NOT auto-apply.
 
   Workflow after this runs:
-    1. Review the staging via `notify_review.py` (Telegram digest)
-       or directly:   python skills/memory-dream/scripts/dream.py runs
+    1. Review the staging via your notification digest or directly:
+       python skills/memory-dream/scripts/dream.py runs
     2. Inspect:       python skills/memory-dream/scripts/dream.py diff <run_id>
     3. Adopt:         python skills/memory-dream/scripts/dream.py adopt <run_id>
        or discard:    python skills/memory-dream/scripts/dream.py discard <run_id>
 
-  Cadence: `0 11 1,15 * *` (1st and 15th at 11:00). Same pattern
-  as hermes-dream's weekly cron.
+  Cadence: `0 11 1,15 * *` (1st and 15th at 11:00).
 
-  Replace <PYTHON_PATH>, <HOME>, and <USER> below before loading.
+  Replace <PYTHON_PATH>, <REPO_ROOT>, <HOME>, and <USER> below before loading.
 -->
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.agent_architecture.dream</string>
+    <string>com.ecc.memory-dream</string>
     <key>ProgramArguments</key>
     <array>
         <string>&lt;PYTHON_PATH&gt;</string>
-        <string>&lt;HOME&gt;/agent_architecture/skills/memory-dream/scripts/dream.py</string>
+        <string>&lt;REPO_ROOT&gt;/skills/memory-dream/scripts/dream.py</string>
         <string>run</string>
         <string>--user-id</string>
         <string>owner:&lt;USER&gt;</string>
@@ -60,8 +59,8 @@
         <string>1</string>
     </dict>
     <key>StandardOutPath</key>
-    <string>&lt;HOME&gt;/Library/Logs/com.agent_architecture.dream.log</string>
+    <string>&lt;HOME&gt;/Library/Logs/com.ecc.memory-dream.log</string>
     <key>StandardErrorPath</key>
-    <string>&lt;HOME&gt;/Library/Logs/com.agent_architecture.dream.err</string>
+    <string>&lt;HOME&gt;/Library/Logs/com.ecc.memory-dream.err</string>
 </dict>
 </plist>

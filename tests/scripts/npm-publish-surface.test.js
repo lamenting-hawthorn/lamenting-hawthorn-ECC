@@ -50,6 +50,9 @@ function buildExpectedPublishPaths(repoRoot) {
     "scripts/dashboard-web.js",
     "scripts/discussion-audit.js",
     "scripts/doctor.js",
+    "scripts/hygiene-worker.py",
+    "scripts/install-hygiene-worker.sh",
+    "scripts/record_invocation.py",
     "scripts/status.js",
     "scripts/sessions-cli.js",
     "scripts/work-items.js",
@@ -82,6 +85,12 @@ function buildExpectedPublishPaths(repoRoot) {
     "VERSION",
     "assets/ecc-icon.svg",
     "assets/hero.png",
+    "docs/hygiene.md",
+    "docs/launchd",
+    "init_schema.sql",
+    "skills/goal-loop",
+    "skills/memory-dream",
+    "src/telemetry",
   ]
   const exclusionPaths = [
     "!**/__pycache__/**",
@@ -142,6 +151,9 @@ function main() {
         "scripts/release-video-suite.js",
         "scripts/work-items.js",
         "scripts/platform-audit.js",
+        "scripts/hygiene-worker.py",
+        "scripts/install-hygiene-worker.sh",
+        "scripts/record_invocation.py",
         "scripts/codex/check-plugin-cache.js",
         ".gemini/GEMINI.md",
         ".qwen/QWEN.md",
@@ -152,6 +164,9 @@ function main() {
         "assets/hero.png",
         "schemas/install-state.schema.json",
         "skills/backend-patterns/SKILL.md",
+        "skills/goal-loop/SKILL.md",
+        "skills/memory-dream/SKILL.md",
+        "src/telemetry/__init__.py",
       ]) {
         assert.ok(
           packagedPaths.has(requiredPath),

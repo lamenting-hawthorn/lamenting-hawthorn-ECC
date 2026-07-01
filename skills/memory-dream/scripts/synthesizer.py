@@ -354,7 +354,7 @@ def _validate_base_url(base_url: str) -> None:
 def _find_repo_root() -> Path | None:
     """
     Walk up from this file looking for ``init_schema.sql`` (the
-    signature file of the agent-architecture repo). Returns ``None``
+    signature file of the runtime repo). Returns ``None``
     if not found.
     """
     from pathlib import Path

@@ -52,6 +52,12 @@ touching the database.
 
 ## Examples
 
+Install the optional Postgres driver before running the worker:
+
+```bash
+python3 -m pip install ".[postgres]"
+```
+
 One-shot pass (CI / manual):
 
 ```bash
@@ -78,8 +84,8 @@ python scripts/hygiene-worker.py --once --dry-run
 bash scripts/install-hygiene-worker.sh --load
 ```
 
-The script substitutes `<HOME>` and `<PYTHON_PATH>` placeholders with
-absolute paths, writes the plist to
+The script substitutes `<HOME>`, `<REPO_ROOT>`, and `<PYTHON_PATH>`
+placeholders with absolute paths, writes the plist to
 `~/Library/LaunchAgents/com.ecc.hygiene.plist`, and loads it via
 `launchctl`. Omit `--load` to write the plist without loading.
 

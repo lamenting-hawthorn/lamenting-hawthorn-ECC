@@ -2,7 +2,7 @@
 parser.py — Read ``memory.typed_memory`` rows into structured entries
 for the dream curation pipeline.
 
-Mirrors the role of hermes-dream's parser.py: turn a "store" into
+Turns a memory "store" into
 structured records the curator can reason about and the diff report
 can summarize. Here the "store" is the ``memory.typed_memory`` table
 instead of a §-delimited markdown file.
@@ -19,9 +19,6 @@ import os
 import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-
-import psycopg
-from psycopg.rows import dict_row
 
 
 @dataclass
@@ -88,8 +85,11 @@ _DEFAULT_ORDER_SQL = """
 """
 
 
-def _connect(database_url: str | None = None) -> psycopg.Connection:
+def _connect(database_url: str | None = None):
     url = database_url or os.environ.get("DATABASE_URL", DEFAULT_DATABASE_URL)
+    import psycopg
+    from psycopg.rows import dict_row
+
     return psycopg.connect(url, row_factory=dict_row)
 
 
@@ -178,7 +178,7 @@ def render_entries(entries: Iterable[MemoryEntry]) -> str:
     The output is informational — adopt() does not actually re-write
     this format; it writes back to typed_memory with proper schema
     fields. This helper exists so diff.md and report.md are readable
-    in the same format hermes-dream uses.
+    in the same human-readable format used by the diff report.
     """
     return "\n§\n".join(_format_entry(e) for e in entries)
 

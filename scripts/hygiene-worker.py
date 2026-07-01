@@ -260,6 +260,7 @@ def _execute_one_pass(
     database_url: str,
     telemetry_path: Path,
     pass_count: int,
+    db_error_class: type[BaseException],
 ) -> int:
     """Run a single pass. Returns 0 on success, 2 on DB error in --once mode.
 
@@ -270,7 +271,7 @@ def _execute_one_pass(
     t0 = time.monotonic()
     try:
         results = _run_pass(database_url, args.dry_run)
-    except _db_error_class() as exc:
+    except (db_error_class, ImportError) as exc:
         _LOGGER.error("hygiene pass %d failed: %s", pass_count, exc)
         if args.once:
             return 2
@@ -290,6 +291,7 @@ def _daemon_loop(args: argparse.Namespace) -> int:
     """
     database_url = _resolve_database_url(args)
     telemetry_path = _resolve_telemetry_path(args)
+    db_error_class = _db_error_class()
 
     _LOGGER.info(
         "hygiene-worker starting (interval=%ds, dry_run=%s, telemetry=%s)",
@@ -303,7 +305,9 @@ def _daemon_loop(args: argparse.Namespace) -> int:
             return 0
         pass_count += 1
 
-        exit_code = _execute_one_pass(args, database_url, telemetry_path, pass_count)
+        exit_code = _execute_one_pass(
+            args, database_url, telemetry_path, pass_count, db_error_class,
+        )
         if exit_code != 0:
             return exit_code
         if args.once:

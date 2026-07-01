@@ -102,6 +102,18 @@ class TestSqliteStore(unittest.TestCase):
         self.assertEqual(n, 7)
         self.assertEqual(sum(1 for _ in store.iter_all()), 7)
 
+    def test_insert_many_uses_one_explicit_transaction(self):
+        source = Path(sys.modules[SqliteEventStore.__module__].__file__).read_text(encoding="utf-8")
+        self.assertIn("BEGIN", source)
+        self.assertIn("COMMIT", source)
+
+    def test_iter_all_releases_lock_before_yielding(self):
+        import inspect
+
+        source = inspect.getsource(SqliteEventStore.iter_all)
+        self.assertLess(source.index("rows ="), source.index("for row in rows"))
+        self.assertLess(source.index("with self._lock"), source.index("rows ="))
+
     def test_round_trip_preserves_all_fields(self):
         store = SqliteEventStore(self._path)
         self.addCleanup(store.close)

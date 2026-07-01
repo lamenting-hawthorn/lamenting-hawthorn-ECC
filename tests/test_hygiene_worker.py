@@ -81,6 +81,11 @@ class TestArgparse(unittest.TestCase):
         with self.assertRaises(SystemExit):
             mod._parse_args(["--log-level", "NOPE"])
 
+    def test_execute_one_pass_accepts_stable_db_error_class(self):
+        mod = _import_worker()
+        args = mod._parse_args(["--once"])
+        self.assertIn("db_error_class", mod._execute_one_pass.__code__.co_varnames)
+
 
 class TestResolveUrls(unittest.TestCase):
     def test_resolve_database_url_from_args(self):
@@ -244,6 +249,17 @@ class TestEndToEndDryRun(unittest.TestCase):
         self.assertEqual(r.returncode, 0)
         self.assertIn("hygiene pass", r.stderr)
         self.assertIn("no work", r.stderr)
+
+
+class TestSchemaHygieneSql(unittest.TestCase):
+    def test_cleanup_orphan_edges_does_not_cast_indexed_memory_id(self):
+        sql = (REPO_ROOT / "init_schema.sql").read_text(encoding="utf-8")
+        start = sql.index("create or replace function memory.cleanup_orphan_edges()")
+        end = sql.index("-- 6f. Clean up old audit_log rows", start)
+        body = sql[start:end]
+        self.assertNotIn("m.id::text", body)
+        self.assertIn("e.source_id::uuid", body)
+        self.assertIn("e.target_id::uuid", body)
 
 
 if __name__ == "__main__":

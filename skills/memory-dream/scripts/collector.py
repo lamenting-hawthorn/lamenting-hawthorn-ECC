@@ -1,8 +1,8 @@
 """
 collector.py — Mine recent runtime activity for the dream curation pass.
 
-In hermes-dream, the "past activity" source is session JSONL files in
-``~/.hermes/sessions/``. Here, the equivalent is three tables that the
+In file-staged memory systems, the "past activity" source is often
+session JSONL files. Here, the equivalent is three tables that the
 runtime already writes to:
 
   - ``event_store.events``  — every incoming user message, tool result,
@@ -23,9 +23,6 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-
-import psycopg
-from psycopg.rows import dict_row
 
 DEFAULT_DATABASE_URL = "postgresql:///agent_memory"
 
@@ -71,6 +68,9 @@ class ActivityDigest:
 
 def _connect(database_url: str | None = None):
     url = database_url or os.environ.get("DATABASE_URL", DEFAULT_DATABASE_URL)
+    import psycopg
+    from psycopg.rows import dict_row
+
     return psycopg.connect(url, row_factory=dict_row)
 
 

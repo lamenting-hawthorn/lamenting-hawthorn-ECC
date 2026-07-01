@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-dream.py — Memory Dream orchestrator for agent-architecture.
+dream.py — Memory Dream orchestrator for Postgres typed_memory stores.
 
 Batch memory curation: read memory.typed_memory, mine recent
 runtime activity, ask the LLM for reorganization proposals, stage the
 proposals in memory.dream_proposals, then wait for human review
 before any actual writeback to typed_memory.
 
-This is the Postgres-native equivalent of hermes-dream's dream.py.
-Same shape of CLI, same conservative posture, same review-before-apply
-discipline, but the data model is the live database instead of
-markdown files.
+This keeps the conservative review-before-apply discipline of
+file-staged memory curation, but the data model is the live database
+instead of markdown files.
 
 Usage:
   dream.py run [--focus "text"] [--max-sessions N] [--max-age-days N]
@@ -39,8 +38,6 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 # Auto-load LLM_API_KEY from .env if not already set.
 from _loadenv import load_api_key  # noqa: E402
-
-load_api_key()
 
 import collector  # noqa: E402
 import controller  # noqa: E402
@@ -80,7 +77,9 @@ def _sanitize_excerpt(text: str, max_chars: int = 600) -> str:
 def cmd_run(args) -> int:
     """Run the full dream pipeline: parse -> collect -> synthesize -> stage."""
     user_id = args.user_id or DEFAULT_ACTOR_ID
-    model = args.model or DEFAULT_MODEL
+    model = args.model or os.environ.get(
+        "DREAM_MODEL", os.environ.get("LLM_MODEL", DEFAULT_MODEL),
+    )
 
     # Pre-flight: are there already pending proposals from a previous
     # run for THIS user? ``pending_proposals_count`` accepts a
@@ -154,6 +153,7 @@ def cmd_run(args) -> int:
         return 0
 
     # 4. LLM curation pass.
+    load_api_key()
     print(f"\n Calling LLM ({model}) for synthesis pass…")
     run_id = controller.start_run(
         model=model,
@@ -360,7 +360,7 @@ def main() -> int:
     # p_run / p_status / etc. are subparser objects.
     ap = argparse.ArgumentParser(
         prog="dream",
-        description="Memory Dream: batch memory curation for agent-architecture",
+        description="Memory Dream: batch memory curation for typed_memory",
     )
     ap.add_argument(
         "--database-url", help="Override $DATABASE_URL",

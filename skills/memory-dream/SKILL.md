@@ -1,23 +1,22 @@
 ---
 name: memory-dream
-description: "Batch memory curation for the agent-architecture runtime — dedup, merge, supersede, archive, and flag typed_memory rows based on recent runtime activity."
+description: "Batch memory curation for Postgres typed_memory stores — dedup, merge, supersede, archive, and flag rows based on recent runtime activity."
 version: 0.1.0
-author: Agent Architecture contributors
+author: ECC contributors
 license: MIT
 metadata:
-  agent_architecture:
+  ecc:
     tags: [memory, curation, batch, semantic, dream]
     related: [memory, retrieval, trace]
-    related_skills: [hermes-dream, hermes-agent-skill-authoring, agent-learning-systems, cron-job-workflows]
+    related_skills: [agent-learning-systems, cron-job-workflows]
 ---
 
-# Memory Dream (agent-architecture edition)
+# Memory Dream
 
-Memory Dream is a batch memory-curation skill for the
-agent-architecture runtime. It is a Postgres-native port of
-[hermes-dream](https://github.com/lamenting-hawthorn/agent-architecture-public)
-(hermes-agent's personal memory curator), adapted to operate on
-`memory.typed_memory` rows instead of §-delimited markdown files.
+Memory Dream is a batch memory-curation skill for Postgres-backed
+typed-memory runtimes. It adapts the file-staged memory curation
+pattern to operate on `memory.typed_memory` rows instead of
+§-delimited markdown files.
 
 It is the missing maintenance layer for the runtime's three-layer
 memory model:
@@ -84,7 +83,7 @@ is by time-scale:
 |--------|---------|-------|--------------|
 | `event_worker.py` | Continuous | events → typed_memory | Per-event salience + write |
 | `scripts/connect_skillloop.py` | Hourly | approved proposals → typed_memory | SkillLoop writeback |
-| `scripts/bridge_vault_and_sessions.py` | Hourly | vault + hermes DB → typed_memory | External import |
+| external import bridge | Hourly | external stores → typed_memory | External import |
 | `scripts/notify_review.py` | Hourly | pending proposals → Telegram | Human notification |
 | **`memory-dream` (this skill)** | **Biweekly** | **typed_memory** | **Batch dedup / merge / archive** |
 
@@ -104,6 +103,13 @@ Do **not** use:
 - To replace the per-event write path (they serve different time-scales).
 
 ## Usage
+
+Install the optional Postgres driver before running against a live
+database:
+
+```bash
+python3 -m pip install ".[postgres]"
+```
 
 ```bash
 # From the repo root
@@ -152,7 +158,7 @@ skills/memory-dream/
 │   ├── _loadenv.py               # secret-safe .env loader
 │   └── test_dream.py             # smoke test (no DB required)
 └── references/
-    └── schema-mapping.md         # how dream maps to the agent-architecture schema
+    └── schema-mapping.md         # how file-staged memory maps to the DB schema
 ```
 
 ## How it works (detailed)
@@ -242,18 +248,16 @@ higher-stakes runs.
 
 ## Scheduling
 
-The repo's existing launchd plist pattern (see
-`docs/launchd/com.agent_architecture.controller.plist` etc.) is
-the recommended host. A sample plist lives at
-`docs/launchd/com.agent_architecture.dream.plist` and runs the
-dream on the 1st and 15th of each month at 11:00.
+The repo's existing launchd plist pattern is the recommended host. A
+sample plist lives at `docs/launchd/com.ecc.memory-dream.plist` and
+runs the dream on the 1st and 15th of each month at 11:00.
 
 ```bash
 # Bootstrap the plist (after install.sh sets up the repo)
-cp docs/launchd/com.agent_architecture.dream.plist \
+cp docs/launchd/com.ecc.memory-dream.plist \
    ~/Library/LaunchAgents/
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agent_architecture.dream.plist
-launchctl enable gui/$(id -u)/com.agent_architecture.dream
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ecc.memory-dream.plist
+launchctl enable gui/$(id -u)/com.ecc.memory-dream
 ```
 
 ## Safety
@@ -298,14 +302,14 @@ launchctl enable gui/$(id -u)/com.agent_architecture.dream
   dedup pass at threshold 0.92 catches most of these, but a small
   fraction will need the LLM. Trust the diff.
 
-## Differences from hermes-dream
+## Differences from file-staged memory curation
 
-| | hermes-dream (Hermes) | memory-dream (agent-architecture) |
+| | File-staged curator | memory-dream |
 |---|---|---|
-| Input | `~/.hermes/memories/MEMORY.md` + `USER.md` | `memory.typed_memory` rows |
-| "Past activity" source | `~/.hermes/sessions/*.jsonl` | `event_store.events` + `memory.retrieval_logs` + `memory.trace_events` |
+| Input | memory markdown files | `memory.typed_memory` rows |
+| "Past activity" source | session JSONL files | `event_store.events` + `memory.retrieval_logs` + `memory.trace_events` |
 | Memory types | Two (memory / user) | Three (episodic / semantic / procedural) |
-| Staging | Files in `~/.hermes/memories/.staging/` | Two Postgres tables: `memory.dream_runs` + `memory.dream_proposals` |
+| Staging | files in a staging directory | Two Postgres tables: `memory.dream_runs` + `memory.dream_proposals` |
 | Dedup mechanism | Hash + substring + prefix | Hash + substring + prefix + **pgvector cosine** |
 | Adopt action | Replace memory files | Mutate `memory.typed_memory` (UPDATE / FK) in a single txn |
 | Rollback | Backup of original files | N/A (no original files; transactions + audit log) |

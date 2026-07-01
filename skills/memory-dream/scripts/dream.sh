@@ -30,7 +30,7 @@ export PYTHONUNBUFFERED=1
 # Only LLM_API_KEY-style variables are exported; comments, blank
 # lines, and non-matching lines are silently ignored.
 if [[ -f "$REPO_ROOT/.env" ]]; then
-    while IFS='=' read -r key value; do
+    while IFS='=' read -r key value || [[ -n "${key:-}" ]]; do
         # Skip blank lines and comments.
         [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]] && continue
         # Only allow known LLM env vars, identified by name only.

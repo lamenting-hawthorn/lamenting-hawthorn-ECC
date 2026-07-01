@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 # install-hygiene-worker.sh — Install the ECC hygiene worker launchd plist.
 #
-# Substitutes <HOME> and <PYTHON_PATH> placeholders in the repo plist,
-# writes the result to ~/Library/LaunchAgents/com.ecc.hygiene.plist,
-# and optionally loads it via launchctl.
+# Substitutes <HOME>, <REPO_ROOT>, and <PYTHON_PATH> placeholders in
+# the repo plist, writes the result to
+# ~/Library/LaunchAgents/com.ecc.hygiene.plist, and optionally loads
+# it via launchctl.
 #
 # Usage:
 #   bash scripts/install-hygiene-worker.sh [--load]
 #
-# The script discovers PYTHON_PATH from ``which python3`` and HOME from
-# ``$HOME``. Pass --load to invoke ``launchctl load`` automatically.
+# The script discovers PYTHON_PATH from ``which python3``, HOME from
+# ``$HOME``, and REPO_ROOT from the script location. Pass --load to
+# invoke ``launchctl load`` automatically.
 
 set -euo pipefail
 
@@ -32,6 +34,7 @@ fi
 mkdir -p "${HOME}/Library/LaunchAgents"
 
 sed -e "s|<HOME>|${HOME}|g" \
+    -e "s|<REPO_ROOT>|${REPO_ROOT}|g" \
     -e "s|<PYTHON_PATH>|${PYTHON_PATH}|g" \
     "${SRC_PLIST}" > "${DEST_PLIST}"
 

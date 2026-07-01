@@ -44,7 +44,7 @@ def load_api_key(env_path: Path | None = None) -> str:
       1. ``LLM_API_KEY`` already in environment → use as-is
       2. ``OPENAI_API_KEY`` already in environment → use as-is
       3. Read the .env file at ``env_path`` (default ``<repo>/.env``)
-      4. Read ``~/.hermes/.env`` as a fallback
+      4. Read ``~/.ecc/.env`` as a fallback
 
     Bearer prefix (case-insensitive) and surrounding single/double
     quotes are stripped from the value before return.
@@ -68,7 +68,7 @@ def load_api_key(env_path: Path | None = None) -> str:
     if env_path is not None:
         candidates.append(Path(env_path))
     candidates.append(Path.cwd() / ".env")
-    candidates.append(Path.home() / ".hermes" / ".env")
+    candidates.append(Path.home() / ".ecc" / ".env")
 
     tried: list[str] = []
     for path in candidates:

@@ -2,8 +2,8 @@
 controller.py — Manage the dream staging tables and adopt / discard
 operations.
 
-In hermes-dream, staging is a directory on disk (``~/.hermes/memories/.staging/``)
-holding five files. Here, staging is two Postgres tables:
+In file-staged memory systems, staging is a directory on disk holding
+review files. Here, staging is two Postgres tables:
 
   - ``memory.dream_runs``      — one row per dream.py invocation
                                  (started_at, finished_at, model, summary,
@@ -41,10 +41,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from uuid import uuid4
 
-import psycopg
 from parser import ParsedStore
-from psycopg.rows import dict_row
-from psycopg.types.json import Jsonb
 from synthesizer import Proposal, SynthesisResult
 
 DEFAULT_DATABASE_URL = "postgresql:///agent_memory"
@@ -52,6 +49,9 @@ DEFAULT_DATABASE_URL = "postgresql:///agent_memory"
 
 def _connect(database_url: str | None = None):
     url = database_url or os.environ.get("DATABASE_URL", DEFAULT_DATABASE_URL)
+    import psycopg
+    from psycopg.rows import dict_row
+
     return psycopg.connect(url, row_factory=dict_row)
 
 
@@ -79,41 +79,50 @@ def stage_proposals(
     valid_ids = {e.row_id for e in store.entries}
 
     with _connect(database_url) as conn:
-        inserted: list[str] = []
-        for p in result.proposals:
-            if p.row_id not in valid_ids:
-                continue
-            if p.action == "supersede":
-                if not p.proposed_superseded_by_id or p.proposed_superseded_by_id not in valid_ids:
+        staged_by_row: dict[str, str] = {}
+        with conn.transaction():
+            for p in result.proposals:
+                if p.row_id not in valid_ids:
                     continue
-            elif p.action == "merge":
-                if not p.proposed_replacement:
-                    continue
-            row = conn.execute(
-                """
-                insert into memory.dream_proposals
-                    (run_id, row_id, action, proposed_replacement,
-                     proposed_superseded_by_id, confidence, rationale)
-                values (%s, %s, %s, %s, %s, %s, %s)
-                returning id
-                """,
-                (
-                    run_id,
-                    p.row_id,
-                    p.action,
-                    p.proposed_replacement,
-                    p.proposed_superseded_by_id,
-                    p.confidence,
-                    p.rationale,
-                ),
-            ).fetchone()
-            inserted.append(str(row["id"]))
-        conn.execute(
-            "update memory.dream_runs set proposals_count = %s where run_id = %s",
-            (len(inserted), run_id),
-        )
-        conn.commit()
-        return inserted
+                if p.action == "supersede":
+                    if (
+                        not p.proposed_superseded_by_id
+                        or p.proposed_superseded_by_id not in valid_ids
+                    ):
+                        continue
+                elif p.action == "merge":
+                    if not p.proposed_replacement:
+                        continue
+                row = conn.execute(
+                    """
+                    insert into memory.dream_proposals
+                        (run_id, row_id, action, proposed_replacement,
+                         proposed_superseded_by_id, confidence, rationale)
+                    values (%s, %s, %s, %s, %s, %s, %s)
+                    on conflict (run_id, row_id) do update
+                        set action = excluded.action,
+                            proposed_replacement = excluded.proposed_replacement,
+                            proposed_superseded_by_id = excluded.proposed_superseded_by_id,
+                            confidence = excluded.confidence,
+                            rationale = excluded.rationale
+                    returning id
+                    """,
+                    (
+                        run_id,
+                        p.row_id,
+                        p.action,
+                        p.proposed_replacement,
+                        p.proposed_superseded_by_id,
+                        p.confidence,
+                        p.rationale,
+                    ),
+                ).fetchone()
+                staged_by_row[p.row_id] = str(row["id"])
+            conn.execute(
+                "update memory.dream_runs set proposals_count = %s where run_id = %s",
+                (len(staged_by_row), run_id),
+            )
+        return list(staged_by_row.values())
 
 
 def latest_run(
@@ -257,118 +266,132 @@ def adopt_run(
     """
     actor = actor_id or os.environ.get("ACTOR_ID", "system:dream")
 
+    adopted = 0
+    rejected = 0
+    skipped = 0
+    errors: list[str] = []
+
     with _connect(database_url) as conn:
-        with conn.transaction():
-            # Lock the proposals we're about to apply.
-            if proposal_ids is not None:
-                pid_list = list(proposal_ids)
-                proposals = conn.execute(
-                    """
-                    select p.*, m.user_id, m.memory_type, m.category
-                    from memory.dream_proposals p
-                    join memory.typed_memory m on m.id = p.row_id
-                    where p.run_id = %s
-                      and p.id = ANY(%s)
-                      and p.reviewer_action is null
-                    for update
-                    """,
-                    (run_id, pid_list),
-                ).fetchall()
-            else:
-                proposals = conn.execute(
-                    """
-                    select p.*, m.user_id, m.memory_type, m.category
-                    from memory.dream_proposals p
-                    join memory.typed_memory m on m.id = p.row_id
-                    where p.run_id = %s
-                      and p.reviewer_action is null
-                    for update
-                    """,
-                    (run_id,),
-                ).fetchall()
-
-            adopted = 0
-            rejected = 0
-            skipped = 0
-            errors: list[str] = []
-
-            for prop in proposals:
-                confidence = float(prop["confidence"])
-                if confidence < min_confidence:
-                    # Skipped (low confidence) — not adopted. The
-                    # proposal row is marked rejected in storage
-                    # for audit, so the run-level ``rejected``
-                    # counter must also increment (otherwise
-                    # ``rejected_count`` would underreport the
-                    # actual number of rejected proposal rows).
-                    # ``skipped`` tracks the subset that did not
-                    # execute an apply helper.
-                    skipped += 1
-                    rejected += 1
-                    _mark_proposal(conn, prop["id"], "rejected",
-                                   rationale_extra=f"skipped: confidence {confidence:.2f} < {min_confidence}")
-                    continue
-
-                action = prop["action"]
-
-                if action == "keep":
-                    _mark_proposal(conn, prop["id"], "adopted")
-                    _audit(conn, actor, prop["row_id"], "memory_read",
-                           {"dream_action": "keep", "run_id": run_id})
-                    adopted += 1
-
-                elif action == "merge":
-                    _apply_merge(conn, prop, actor, run_id)
-                    _mark_proposal(conn, prop["id"], "adopted")
-                    adopted += 1
-
-                elif action == "supersede":
-                    _apply_supersede(conn, prop, actor, run_id)
-                    _mark_proposal(conn, prop["id"], "adopted")
-                    adopted += 1
-
-                elif action == "archive":
-                    _apply_archive(conn, prop, actor, run_id)
-                    _mark_proposal(conn, prop["id"], "adopted")
-                    adopted += 1
-
-                elif action == "flag_for_review":
-                    _apply_flag(conn, prop, actor, run_id)
-                    _mark_proposal(conn, prop["id"], "adopted")
-                    adopted += 1
-
+        try:
+            with conn.transaction():
+                # Lock the proposals we're about to apply.
+                if proposal_ids is not None:
+                    pid_list = list(proposal_ids)
+                    proposals = conn.execute(
+                        """
+                        select p.*, m.user_id, m.memory_type, m.category, m.content
+                        from memory.dream_proposals p
+                        join memory.typed_memory m on m.id = p.row_id
+                        where p.run_id = %s
+                          and p.id = ANY(%s)
+                          and p.reviewer_action is null
+                        for update
+                        """,
+                        (run_id, pid_list),
+                    ).fetchall()
                 else:
-                    # Unknown action — same accounting as the
-                    # low-confidence branch: the proposal row is
-                    # rejected in storage, so both ``skipped`` and
-                    # ``rejected`` increment.
-                    skipped += 1
-                    rejected += 1
-                    _mark_proposal(conn, prop["id"], "rejected",
-                                   rationale_extra=f"unknown action: {action}")
+                    proposals = conn.execute(
+                        """
+                        select p.*, m.user_id, m.memory_type, m.category, m.content
+                        from memory.dream_proposals p
+                        join memory.typed_memory m on m.id = p.row_id
+                        where p.run_id = %s
+                          and p.reviewer_action is null
+                        for update
+                        """,
+                        (run_id,),
+                    ).fetchall()
 
-            # Update run counters. ``rejected_count`` reflects the
-            # number of proposal rows whose ``reviewer_action`` is
-            # 'rejected' (includes the skipped-by-confidence and
-            # unknown-action paths, which are also marked rejected
-            # in storage for audit). ``skipped_count`` is the
-            # count of proposals that did NOT execute an apply
-            # helper (low confidence or unknown action); it is a
-            # strict subset of ``rejected_count``.
+                for prop in proposals:
+                    confidence = float(prop["confidence"])
+                    if confidence < min_confidence:
+                        # Skipped (low confidence) — not adopted. The
+                        # proposal row is marked rejected in storage
+                        # for audit, so the run-level ``rejected``
+                        # counter must also increment (otherwise
+                        # ``rejected_count`` would underreport the
+                        # actual number of rejected proposal rows).
+                        # ``skipped`` tracks the subset that did not
+                        # execute an apply helper.
+                        skipped += 1
+                        rejected += 1
+                        _mark_proposal(conn, prop["id"], "rejected",
+                                       rationale_extra=f"skipped: confidence {confidence:.2f} < {min_confidence}")
+                        continue
+
+                    action = prop["action"]
+
+                    if action == "keep":
+                        _mark_proposal(conn, prop["id"], "adopted")
+                        _audit(conn, actor, prop["row_id"], "memory_read",
+                               {"dream_action": "keep", "run_id": run_id})
+                        adopted += 1
+
+                    elif action == "merge":
+                        _apply_merge(conn, prop, actor, run_id)
+                        _mark_proposal(conn, prop["id"], "adopted")
+                        adopted += 1
+
+                    elif action == "supersede":
+                        _apply_supersede(conn, prop, actor, run_id)
+                        _mark_proposal(conn, prop["id"], "adopted")
+                        adopted += 1
+
+                    elif action == "archive":
+                        _apply_archive(conn, prop, actor, run_id)
+                        _mark_proposal(conn, prop["id"], "adopted")
+                        adopted += 1
+
+                    elif action == "flag_for_review":
+                        _apply_flag(conn, prop, actor, run_id)
+                        _mark_proposal(conn, prop["id"], "adopted")
+                        adopted += 1
+
+                    else:
+                        # Unknown action — same accounting as the
+                        # low-confidence branch: the proposal row is
+                        # rejected in storage, so both ``skipped`` and
+                        # ``rejected`` increment.
+                        skipped += 1
+                        rejected += 1
+                        _mark_proposal(conn, prop["id"], "rejected",
+                                       rationale_extra=f"unknown action: {action}")
+
+                # Update run counters. ``rejected_count`` reflects the
+                # number of proposal rows whose ``reviewer_action`` is
+                # 'rejected' (includes the skipped-by-confidence and
+                # unknown-action paths, which are also marked rejected
+                # in storage for audit). ``skipped_count`` is the
+                # count of proposals that did NOT execute an apply
+                # helper (low confidence or unknown action); it is a
+                # strict subset of ``rejected_count``.
+                conn.execute(
+                    """
+                    update memory.dream_runs
+                    set status = 'completed',
+                        finished_at = now(),
+                        adopted_count = %s,
+                        rejected_count = %s,
+                        skipped_count = %s
+                    where run_id = %s
+                    """,
+                    (adopted, rejected, skipped, run_id),
+                )
+                return AdoptResult(adopted=adopted, rejected=rejected, skipped=skipped, errors=errors)
+        except Exception as exc:
+            message = str(exc)
+            errors.append(message)
             conn.execute(
                 """
                 update memory.dream_runs
-                set status = 'completed',
+                set status = 'failed',
                     finished_at = now(),
-                    adopted_count = %s,
-                    rejected_count = %s,
-                    skipped_count = %s
+                    error_message = %s
                 where run_id = %s
                 """,
-                (adopted, rejected, skipped, run_id),
+                (message[:2000], run_id),
             )
-            # The transaction commits on context exit.
-
+            conn.commit()
             return AdoptResult(adopted=adopted, rejected=rejected, skipped=skipped, errors=errors)
 
 
@@ -390,6 +413,8 @@ def _mark_proposal(conn, proposal_id, action, *, rationale_extra: str = "") -> N
 
 
 def _audit(conn, actor, target_id, event_type, details: dict) -> None:
+    from psycopg.types.json import Jsonb
+
     conn.execute(
         """
         insert into memory.audit_log

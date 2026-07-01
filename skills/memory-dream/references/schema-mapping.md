@@ -1,26 +1,25 @@
-# Schema mapping: hermes-dream → memory-dream
+# Schema mapping: file-staged memory → memory-dream
 
-This document maps the data structures in hermes-dream (Hermes's
-flat-file memory curator) to the data structures in memory-dream
-(the agent-architecture equivalent). If you are familiar with
-hermes-dream, this is the diff.
+This document maps a flat-file memory curator's data structures to
+the data structures in memory-dream. If you are familiar with a
+file-staged memory workflow, this is the diff.
 
 ## High-level
 
-| hermes-dream | memory-dream |
+| File-staged memory | memory-dream |
 |---|---|
-| `~/.hermes/memories/MEMORY.md` | `memory.typed_memory` rows (filtered to `memory_type='semantic'` for the agent's notes) |
-| `~/.hermes/memories/USER.md` | `memory.typed_memory` rows filtered to `memory_type='episodic'` (user-specific context) |
-| `~/.hermes/sessions/*.jsonl` | `event_store.events` + `memory.retrieval_logs` + `memory.trace_events` |
-| `~/.hermes/memories/.staging/MEMORY.md` | one row per (run, row_id) in `memory.dream_proposals` |
-| `~/.hermes/memories/.staging/diff.md` | `python dream.py diff <run_id>` renders to stdout / `--out file.md` |
-| `~/.hermes/memories/.staging/meta.json` | one row per run in `memory.dream_runs` |
-| `~/.hermes/memories/.backups/<ts>/` | N/A (no files to back up; transactions + audit log are the safety net) |
+| `MEMORY.md` | `memory.typed_memory` rows (filtered to `memory_type='semantic'` for the agent's notes) |
+| `USER.md` | `memory.typed_memory` rows filtered to `memory_type='episodic'` (user-specific context) |
+| session JSONL files | `event_store.events` + `memory.retrieval_logs` + `memory.trace_events` |
+| staged memory file | one row per (run, row_id) in `memory.dream_proposals` |
+| staged diff file | `python dream.py diff <run_id>` renders to stdout / `--out file.md` |
+| staged metadata file | one row per run in `memory.dream_runs` |
+| backup directory | N/A (no files to back up; transactions + audit log are the safety net) |
 
 ## MemoryEntry
 
 ```python
-# hermes-dream
+# file-staged memory
 @dataclass
 class MemoryEntry:
     text: str
@@ -55,7 +54,7 @@ similar text) and let the curator emit per-type action plans.
 
 ## Proposal actions
 
-| hermes-dream | memory-dream |
+| File-staged memory | memory-dream |
 |---|---|
 | `keep` (in `memory[]` / `user[]` arrays) | `keep` (one row in `memory.dream_proposals` with `action='keep'`) |
 | `merge` (implicit: text appears once in the new array) | `merge` (`proposed_replacement` text + `UPDATE content = ...`) |
@@ -63,7 +62,7 @@ similar text) and let the curator emit per-type action plans.
 | `add` (new text in the new array) | `flag_for_review` (LLM does not auto-insert; human approves) |
 | (no equivalent) | `archive` (`expires_at = now() + 30d`) |
 
-The biggest behavioural change: hermes-dream could **add** new
+The biggest behavioral change: a file-staged curator could **add** new
 memory entries during synthesis. memory-dream does not — the
 LLM is restricted to reorganizing existing rows. New facts must
 flow through the runtime's normal write path (event worker,
@@ -82,7 +81,7 @@ documented in `SKILL.md`.
 ## What is new
 
 - **pgvector semantic dedup** (threshold 0.92, configurable).
-  hermes-dream's substring / prefix detection is the closest
+  file-staged substring / prefix detection is the closest
   analogue, but it has no concept of semantic similarity.
 - **Permission filtering by actor scope.** Every dedup and
   every adopt is scoped to one `user_id`; cross-actor merges

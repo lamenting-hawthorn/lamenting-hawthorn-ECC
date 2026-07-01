@@ -14,7 +14,7 @@
   stale pending approvals, and old dream runs. It also records
   per-pass metrics to the local telemetry database.
 
-  Replace <PYTHON_PATH> and <HOME> below before loading.
+  Replace <PYTHON_PATH>, <REPO_ROOT>, and <HOME> below before loading.
 
   To install:
     cp com.ecc.hygiene.plist ~/Library/LaunchAgents/
@@ -35,7 +35,7 @@
     <key>ProgramArguments</key>
     <array>
         <string>&lt;PYTHON_PATH&gt;</string>
-        <string>&lt;HOME&gt;/lamenting-hawthorn-ECC/scripts/hygiene-worker.py</string>
+        <string>&lt;REPO_ROOT&gt;/scripts/hygiene-worker.py</string>
         <string>--once</string>
     </array>
     <key>StartInterval</key>

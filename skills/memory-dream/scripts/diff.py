@@ -2,12 +2,12 @@
 diff.py — Generate a human-readable diff report for a dream run.
 
 The :func:`generate_diff_markdown` helper produces the same shape as
-hermes-dream's diff: a markdown summary of what the curator proposed,
+file-staged memory diff: a markdown summary of what the curator proposed,
 grouped by action (keep / merge / supersede / archive / flag_for_review),
 with the original row text, the proposed replacement (for merges), the
 target row (for supersedes), and the model's confidence + rationale.
 
-Unlike hermes-dream, this diff is generated against live Postgres rows
+Unlike flat-file staging, this diff is generated against live Postgres rows
 (in ``memory.dream_proposals`` joined to ``memory.typed_memory``), not
 against a flat-file staging directory. The file is written to a path
 the caller passes in (or to stdout if path is None).
@@ -17,15 +17,16 @@ from __future__ import annotations
 
 import os
 
-import psycopg
 from controller import list_proposals
-from psycopg.rows import dict_row
 
 DEFAULT_DATABASE_URL = "postgresql:///agent_memory"
 
 
 def _connect(database_url: str | None = None):
     url = database_url or os.environ.get("DATABASE_URL", DEFAULT_DATABASE_URL)
+    import psycopg
+    from psycopg.rows import dict_row
+
     return psycopg.connect(url, row_factory=dict_row)
 
 

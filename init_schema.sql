@@ -767,11 +767,19 @@ begin
     delete from memory.memory_edges e
     where not exists (
         select 1 from memory.typed_memory m
-        where m.id::text = e.source_id
+        where m.id = case
+            when e.source_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+            then e.source_id::uuid
+            else null
+        end
     )
     or not exists (
         select 1 from memory.typed_memory m
-        where m.id::text = e.target_id
+        where m.id = case
+            when e.target_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+            then e.target_id::uuid
+            else null
+        end
     );
     get diagnostics deleted_count = row_count;
     return deleted_count;
