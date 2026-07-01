@@ -373,12 +373,12 @@ class TestImports(unittest.TestCase):
     def test_synthesizer_invalid_json_error_does_not_include_response_preview(self):
         from synthesizer import parse_response
 
-        secret_text = "typed memory secret should not leak"
+        placeholder_text = "typed memory placeholder should not leak"
         with self.assertRaises(RuntimeError) as ctx:
-            parse_response("{not json " + secret_text)
+            parse_response("{not json " + placeholder_text)
         message = str(ctx.exception)
         self.assertIn("response_sha256=", message)
-        self.assertNotIn(secret_text, message)
+        self.assertNotIn(placeholder_text, message)
 
     def test_adopt_confirmation_eof_returns_clear_error(self):
         import dream
