@@ -33,7 +33,7 @@ provider and delegate to the middleware.
 **Effort:** Medium.
 
 ### 3. Skill Telemetry & Success-Rate Pipeline
-**Problem:** 273 skills and 92 commands. Zero data on which are used,
+**Problem:** 273 skills and 93 commands. Zero data on which are used,
 which fail, which are slow, which are expensive. Skills are
 "fire and forget."
 **Solution:** A `TelemetryCollector` in `src/telemetry/` hooks skill

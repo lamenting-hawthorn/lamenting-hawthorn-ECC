@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -91,11 +92,15 @@ def _cmd_report(args: argparse.Namespace) -> int:
             "No hooks have recorded invocations yet.",
         )
         return 0
-    store = SqliteEventStore(db_path)
     try:
-        report = build_report(store.iter_all())
-    finally:
-        store.close()
+        store = SqliteEventStore(db_path)
+        try:
+            report = build_report(store.iter_all())
+        finally:
+            store.close()
+    except sqlite3.Error as exc:
+        print(f"Telemetry unavailable: {exc}", file=sys.stderr)
+        return 1
     if args.format == "json":
         print(_render_json(report))
     else:

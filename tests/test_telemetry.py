@@ -16,6 +16,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -85,7 +86,6 @@ class TestSqliteStore(unittest.TestCase):
         store = SqliteEventStore(self._path)
         self.addCleanup(store.close)
         store.insert(_make_event(name="x"))
-        store.flush_safe_close = None  # satisfy linter
         store.close()
         # Reopen and read
         store2 = SqliteEventStore(self._path)
@@ -126,7 +126,7 @@ class TestCollector(unittest.TestCase):
             name="x", kind=EventKind.SKILL, duration_ms=10, success=True,
         )
         # In-memory batch should NOT have flushed yet.
-        self.assertEqual(len(store._events), 0)
+        self.assertEqual(len(list(store.iter_all())), 0)
 
     def test_flush_writes_batch(self):
         store = InMemoryEventStore()
@@ -135,7 +135,7 @@ class TestCollector(unittest.TestCase):
             name="x", kind=EventKind.SKILL, duration_ms=10, success=True,
         )
         collector.flush()
-        self.assertEqual(len(store._events), 1)
+        self.assertEqual(len(list(store.iter_all())), 1)
 
     def test_auto_flush_at_batch_size(self):
         store = InMemoryEventStore()
@@ -145,7 +145,7 @@ class TestCollector(unittest.TestCase):
             collector.record_invocation(
                 name=f"x{i}", kind=EventKind.SKILL, duration_ms=1, success=True,
             )
-        self.assertEqual(len(store._events), 50)
+        self.assertEqual(len(list(store.iter_all())), 50)
 
     def test_failure_persists_error(self):
         store = InMemoryEventStore()
@@ -288,15 +288,27 @@ class TestCli(unittest.TestCase):
                 os.environ["ECC_TELEMETRY_DB"] = old_env
 
     def test_index_for_failures_exists(self):
-        # The failures partial index must be created in the schema.
-        # (Verified by the schema's CREATE INDEX IF NOT EXISTS.)
+        store = SqliteEventStore(self._path)
+        self.addCleanup(store.close)
+        rows = store._conn.execute(
+            """
+            SELECT name, sql
+            FROM sqlite_master
+            WHERE type = 'index' AND name = 'idx_telemetry_events_failures'
+            """,
+        ).fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertIn("WHERE success = 0", rows[0][1])
+
+    def test_cli_returns_nonzero_on_unreadable_db(self):
         from telemetry.cli import main
-        # Smoke: opening the store succeeds and the index is queryable.
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            exit_code = main(["report", "--db", str(self._path),
-                              "--format", "text", "--top", "5"])
-        self.assertEqual(exit_code, 0)
+        bad_path = Path(self._tmp.name) / "not-a-db.sqlite"
+        bad_path.write_text("not sqlite", encoding="utf-8")
+        buf_err = io.StringIO()
+        with contextlib.redirect_stderr(buf_err):
+            exit_code = main(["report", "--db", str(bad_path), "--format", "text"])
+        self.assertEqual(exit_code, 1)
+        self.assertIn("Telemetry unavailable", buf_err.getvalue())
 
 
 class TestRecordInvocationScript(unittest.TestCase):
@@ -315,7 +327,7 @@ class TestRecordInvocationScript(unittest.TestCase):
         else:
             os.environ["ECC_TELEMETRY_DB"] = self._old_env
 
-    def _invoke(self, *extra: str) -> int:
+    def _load_record_invocation_module(self):
         import importlib.util
         spec = importlib.util.spec_from_file_location(
             "record_invocation", str(Path(__file__).resolve().parents[1] / "scripts" / "record_invocation.py"),
@@ -323,8 +335,14 @@ class TestRecordInvocationScript(unittest.TestCase):
         assert spec is not None and spec.loader is not None
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        return mod.main(["--name", "cost-report", "--kind", "command",
-                         "--duration-ms", "42", "--success", "1", *extra])
+        return mod
+
+    def _invoke(self, argv: list[str] | None = None) -> int:
+        mod = self._load_record_invocation_module()
+        return mod.main(argv or [
+            "--name", "cost-report", "--kind", "command",
+            "--duration-ms", "42", "--success", "1",
+        ])
 
     def test_writes_event_to_db(self):
         exit_code = self._invoke()
@@ -339,21 +357,28 @@ class TestRecordInvocationScript(unittest.TestCase):
         self.assertTrue(events[0].success)
 
     def test_failure_event_persists(self):
-        import importlib.util
-        spec = importlib.util.spec_from_file_location(
-            "record_invocation", str(Path(__file__).resolve().parents[1] / "scripts" / "record_invocation.py"),
-        )
-        assert spec is not None and spec.loader is not None
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        exit_code = mod.main(["--name", "x", "--kind", "skill",
-                              "--duration-ms", "10", "--success", "0"])
+        exit_code = self._invoke([
+            "--name", "x", "--kind", "skill",
+            "--duration-ms", "10", "--success", "0",
+        ])
         self.assertEqual(exit_code, 0)
         store = SqliteEventStore(self._path)
         self.addCleanup(store.close)
         events = list(store.iter_all())
         self.assertEqual(len(events), 1)
         self.assertFalse(events[0].success)
+
+    def test_open_default_store_failure_is_non_blocking(self):
+        mod = self._load_record_invocation_module()
+        with mock.patch.object(mod, "open_default_store", side_effect=OSError("nope")):
+            buf_err = io.StringIO()
+            with contextlib.redirect_stderr(buf_err):
+                exit_code = mod.main([
+                    "--name", "x", "--kind", "skill",
+                    "--duration-ms", "10", "--success", "1",
+                ])
+        self.assertEqual(exit_code, 0)
+        self.assertIn("telemetry unavailable", buf_err.getvalue())
 
 
 if __name__ == "__main__":

@@ -767,11 +767,11 @@ begin
     delete from memory.memory_edges e
     where not exists (
         select 1 from memory.typed_memory m
-        where m.id::text = e.source_id
+        where m.id = e.source_id::uuid
     )
     or not exists (
         select 1 from memory.typed_memory m
-        where m.id::text = e.target_id
+        where m.id = e.target_id::uuid
     );
     get diagnostics deleted_count = row_count;
     return deleted_count;

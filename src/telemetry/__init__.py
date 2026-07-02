@@ -175,7 +175,11 @@ class SqliteEventStore:
         self._path = path
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        self._conn = sqlite3.connect(self._path, isolation_level=None)
+        self._conn = sqlite3.connect(
+            self._path,
+            isolation_level=None,
+            check_same_thread=False,
+        )
         self._conn.executescript(_SCHEMA_SQL)
 
     def insert(self, event: Event) -> None:
@@ -189,7 +193,13 @@ class SqliteEventStore:
         if not rows:
             return 0
         with self._lock:
-            self._conn.executemany(_INSERT_SQL, rows)
+            self._conn.execute("BEGIN")
+            try:
+                self._conn.executemany(_INSERT_SQL, rows)
+            except Exception:
+                self._conn.rollback()
+                raise
+            self._conn.commit()
         return len(rows)
 
     def iter_all(self) -> Iterator[Event]:
@@ -210,7 +220,7 @@ def _row_to_event(row: tuple) -> Event:
     used to generate ``_SELECT_SQL``); the ``_row_to_event`` order
     intentionally uses the same list via destructuring.
     """
-    values = dict(zip(_EVENT_COLUMNS, row))
+    values = dict(zip(_EVENT_COLUMNS, row, strict=True))
     return Event(
         name=values["name"],
         kind=EventKind(values["kind"]),

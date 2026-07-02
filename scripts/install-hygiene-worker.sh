@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # install-hygiene-worker.sh — Install the ECC hygiene worker launchd plist.
 #
-# Substitutes <HOME> and <PYTHON_PATH> placeholders in the repo plist,
+# Substitutes <HOME>, <PYTHON_PATH>, and <REPO_ROOT> placeholders in the repo plist,
 # writes the result to ~/Library/LaunchAgents/com.ecc.hygiene.plist,
 # and optionally loads it via launchctl.
 #
@@ -32,7 +32,11 @@ fi
 mkdir -p "${HOME}/Library/LaunchAgents"
 
 sed -e "s|<HOME>|${HOME}|g" \
+    -e "s|&lt;HOME&gt;|${HOME}|g" \
     -e "s|<PYTHON_PATH>|${PYTHON_PATH}|g" \
+    -e "s|&lt;PYTHON_PATH&gt;|${PYTHON_PATH}|g" \
+    -e "s|<REPO_ROOT>|${REPO_ROOT}|g" \
+    -e "s|&lt;REPO_ROOT&gt;|${REPO_ROOT}|g" \
     "${SRC_PLIST}" > "${DEST_PLIST}"
 
 echo "Wrote ${DEST_PLIST}"

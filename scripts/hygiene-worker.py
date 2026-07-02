@@ -51,6 +51,7 @@ import argparse
 import logging
 import os
 import signal
+import sqlite3
 import sys
 import time
 from dataclasses import dataclass
@@ -129,7 +130,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         choices=("DEBUG", "INFO", "WARNING", "ERROR"),
         help="Logging level (default INFO)",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.interval <= 0:
+        parser.error("--interval must be a positive integer")
+    return args
 
 
 def _install_signal_handlers() -> None:
@@ -222,7 +226,7 @@ def _record_pass_metrics(
         return
     try:
         store = SqliteEventStore(store_path)
-    except OSError as exc:
+    except (OSError, sqlite3.Error) as exc:
         _LOGGER.warning("could not open telemetry store at %s: %s", store_path, exc)
         return
     try:
@@ -245,6 +249,34 @@ def _record_pass_metrics(
         store.close()
 
 
+def _record_pass_failure(
+    store_path: Path,
+    *,
+    duration_ms: int,
+    error: BaseException,
+) -> None:
+    """Record a best-effort failure metric for a whole hygiene pass."""
+    try:
+        store = SqliteEventStore(store_path)
+    except (OSError, sqlite3.Error) as exc:
+        _LOGGER.warning("could not open telemetry store at %s: %s", store_path, exc)
+        return
+    try:
+        collector = TelemetryCollector(store=store)
+        collector.record_invocation(
+            name="hygiene_pass",
+            kind=EventKind.AGENT,
+            duration_ms=duration_ms,
+            success=False,
+            actor_id="hygiene-worker",
+            error_type=type(error).__name__,
+            error_message=str(error),
+        )
+        collector.flush()
+    finally:
+        store.close()
+
+
 def _format_pass_summary(results: list[OperationResult], duration_s: float) -> str:
     """Render a one-line pass summary for stdout.
 
@@ -261,7 +293,11 @@ def _execute_one_pass(
     telemetry_path: Path,
     pass_count: int,
 ) -> int:
-    """Run a single pass. Returns 0 on success, 2 on DB error in --once mode.
+    """Run a single pass.
+
+    Returns ``(exit_code, did_backoff)``. ``did_backoff`` is true only
+    when the daemon path already performed the short retry sleep after a
+    database failure.
 
     Split out from ``_daemon_loop`` so the loop body reads as a
     sequence of names and the per-pass logic (timing, error
@@ -271,15 +307,21 @@ def _execute_one_pass(
     try:
         results = _run_pass(database_url, args.dry_run)
     except _db_error_class() as exc:
+        duration_ms = int((time.monotonic() - t0) * 1000)
         _LOGGER.error("hygiene pass %d failed: %s", pass_count, exc)
+        _record_pass_failure(
+            telemetry_path,
+            duration_ms=duration_ms,
+            error=exc,
+        )
         if args.once:
-            return 2
-        time.sleep(min(args.interval, 60))
-        return 0
+            return 2, False
+        _sleep_with_shutdown_check(min(args.interval, 60))
+        return 0, True
     duration_ms = int((time.monotonic() - t0) * 1000)
     _LOGGER.info(_format_pass_summary(results, duration_ms / 1000))
     _record_pass_metrics(telemetry_path, results, duration_ms)
-    return 0
+    return 0, False
 
 
 def _daemon_loop(args: argparse.Namespace) -> int:
@@ -303,14 +345,17 @@ def _daemon_loop(args: argparse.Namespace) -> int:
             return 0
         pass_count += 1
 
-        exit_code = _execute_one_pass(args, database_url, telemetry_path, pass_count)
+        exit_code, did_backoff = _execute_one_pass(
+            args, database_url, telemetry_path, pass_count,
+        )
         if exit_code != 0:
             return exit_code
         if args.once:
             return 0
         if _shutdown_requested:
             return 0
-        _sleep_with_shutdown_check(args.interval)
+        if not did_backoff:
+            _sleep_with_shutdown_check(args.interval)
 
 
 def _sleep_with_shutdown_check(seconds: int) -> None:

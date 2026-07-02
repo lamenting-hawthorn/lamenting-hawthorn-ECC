@@ -41,9 +41,13 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    store = open_default_store()
-    collector = TelemetryCollector(store=store)
     try:
+        store = open_default_store()
+    except Exception as exc:
+        print(f"telemetry unavailable: {exc}", file=sys.stderr)
+        return 0
+    try:
+        collector = TelemetryCollector(store=store)
         collector.record_invocation(
             name=args.name,
             kind=EventKind(args.kind),
@@ -51,6 +55,8 @@ def main(argv: list[str] | None = None) -> int:
             success=bool(args.success),
         )
         collector.flush()
+    except Exception as exc:
+        print(f"telemetry unavailable: {exc}", file=sys.stderr)
     finally:
         store.close()
     return 0

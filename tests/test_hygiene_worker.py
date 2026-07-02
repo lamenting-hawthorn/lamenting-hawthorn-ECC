@@ -14,9 +14,9 @@ import os
 import subprocess
 import sys
 import tempfile
-import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = REPO_ROOT / "scripts"
@@ -71,6 +71,11 @@ class TestArgparse(unittest.TestCase):
         args = mod._parse_args(["--interval", "1800"])
         self.assertEqual(args.interval, 1800)
 
+    def test_interval_must_be_positive(self):
+        mod = _import_worker()
+        with self.assertRaises(SystemExit):
+            mod._parse_args(["--interval", "0"])
+
     def test_database_url_override(self):
         mod = _import_worker()
         args = mod._parse_args(["--database-url", "postgresql:///x"])
@@ -88,18 +93,11 @@ class TestResolveUrls(unittest.TestCase):
         args = mod._parse_args(["--database-url", "postgresql:///a"])
         self.assertEqual(mod._resolve_database_url(args), "postgresql:///a")
 
-    def test_resolve_database_url_from_env(self, monkeypatch=None):
+    def test_resolve_database_url_from_env(self):
         mod = _import_worker()
         args = mod._parse_args([])
-        old = os.environ.get("DATABASE_URL")
-        os.environ["DATABASE_URL"] = "postgresql:///env"
-        try:
+        with mock.patch.dict(os.environ, {"DATABASE_URL": "postgresql:///env"}):
             self.assertEqual(mod._resolve_database_url(args), "postgresql:///env")
-        finally:
-            if old is None:
-                os.environ.pop("DATABASE_URL", None)
-            else:
-                os.environ["DATABASE_URL"] = old
 
     def test_resolve_database_url_default(self):
         mod = _import_worker()
@@ -142,20 +140,18 @@ class TestSleepWithShutdown(unittest.TestCase):
         mod = _import_worker()
         # Force the shutdown flag on, then sleep should return immediately.
         mod._shutdown_requested = True
-        t0 = time.monotonic()
-        mod._sleep_with_shutdown_check(60)  # would normally take 60s
-        elapsed = time.monotonic() - t0
-        self.assertLess(elapsed, 1.0)
+        with mock.patch("time.sleep") as sleep_mock:
+            mod._sleep_with_shutdown_check(60)
+        sleep_mock.assert_not_called()
         mod._shutdown_requested = False  # reset
 
     def test_runs_full_duration_when_no_shutdown(self):
         mod = _import_worker()
         mod._shutdown_requested = False
-        t0 = time.monotonic()
-        mod._sleep_with_shutdown_check(2)  # 2 second sleep
-        elapsed = time.monotonic() - t0
-        self.assertGreaterEqual(elapsed, 1.5)
-        self.assertLess(elapsed, 3.0)
+        with mock.patch("time.sleep") as sleep_mock:
+            mod._sleep_with_shutdown_check(2)
+        self.assertEqual(sleep_mock.call_count, 2)
+        sleep_mock.assert_has_calls([mock.call(1), mock.call(1)])
 
 
 class TestRecordPassMetrics(unittest.TestCase):
@@ -221,6 +217,58 @@ class TestRecordPassMetrics(unittest.TestCase):
             "cleanup_pending_approvals",
             "cleanup_old_dream_runs",
         })
+
+    def test_records_failure_event(self):
+        mod = _import_worker()
+        mod._record_pass_failure(
+            self._path,
+            duration_ms=125,
+            error=RuntimeError("db unavailable"),
+        )
+        from telemetry import SqliteEventStore
+        store = SqliteEventStore(self._path)
+        try:
+            events = list(store.iter_all())
+        finally:
+            store.close()
+        self.assertEqual(len(events), 1)
+        event = events[0]
+        self.assertEqual(event.name, "hygiene_pass")
+        self.assertFalse(event.success)
+        self.assertEqual(event.error_type, "RuntimeError")
+        self.assertEqual(event.actor_id, "hygiene-worker")
+
+
+class TestExecuteOnePass(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._path = Path(self._tmp.name) / "telemetry.db"
+
+    def test_daemon_error_path_records_failure_and_backoff_once(self):
+        mod = _import_worker()
+        args = mod._parse_args(["--interval", "10"])
+        fake_db_error = type("FakeDbError", (Exception,), {})
+        with mock.patch.object(mod, "_db_error_class", return_value=fake_db_error):
+            with mock.patch.object(mod, "_run_pass", side_effect=fake_db_error("boom")):
+                with mock.patch.object(mod, "_sleep_with_shutdown_check") as sleep_mock:
+                    exit_code, did_backoff = mod._execute_one_pass(
+                        args,
+                        "postgresql:///x",
+                        self._path,
+                        1,
+                    )
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(did_backoff)
+        sleep_mock.assert_called_once_with(10)
+        from telemetry import SqliteEventStore
+        store = SqliteEventStore(self._path)
+        try:
+            events = list(store.iter_all())
+        finally:
+            store.close()
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].name, "hygiene_pass")
 
 
 class TestEndToEndDryRun(unittest.TestCase):

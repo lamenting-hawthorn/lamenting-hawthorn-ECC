@@ -45,9 +45,10 @@ Override the DB path with `ECC_TELEMETRY_DB=/custom/path.db /telemetry-report`.
 4. Print a fixed-width text report with two tables: top-N by
    invocation count, then a Top-failing section.
 
-`node` is used so this works identically on macOS, Linux, and Windows
-without a python-on-PATH dependency at the call site. Python is invoked
-subprocess-style to do the actual aggregation.
+`node` is used as the wrapper so path resolution and argument handling
+stay uniform across macOS, Linux, and Windows. The actual aggregation
+still shells out to `python3 -m telemetry.cli`, so this command depends
+on a working Python 3 interpreter being available on `PATH`.
 
 ## Report (default)
 
