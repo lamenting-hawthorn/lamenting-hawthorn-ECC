@@ -98,4 +98,4 @@ a launchd plist template.
 ```
 
 The five are otherwise independent. #1 and #5 each gain value from
-#3 but can land without it.
+Contribution #3 but can land without it.

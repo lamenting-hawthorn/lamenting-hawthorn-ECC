@@ -54,6 +54,12 @@ function runTests() {
   let passed = 0;
   let failed = 0;
 
+  if (process.platform === 'win32') {
+    console.log('  - skipped on Windows; install-hygiene-worker.sh is a bash/launchd surface');
+    console.log(`\nResults: Passed: ${passed}, Failed: ${failed}`);
+    process.exit(0);
+  }
+
   if (test('writes plist with HOME, PYTHON_PATH, and REPO_ROOT substituted', () => {
     const homeDir = createTempDir('install-hygiene-home-');
     try {
