@@ -77,7 +77,7 @@ _LOGGER = logging.getLogger("ecc.hygiene")
 
 
 # Public, exported so callers and tests can refer to these by name.
-DEFAULT_DATABASE_URL = "postgresql:///agent_memory"
+DEFAULT_DATABASE_URL = "postgresql://agent_memory_service@/agent_memory"
 DEFAULT_TELEMETRY_DB = "~/.ecc/telemetry.db"
 DEFAULT_INTERVAL_SECONDS = 60 * 60  # 1 hour
 
@@ -118,7 +118,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--database-url", default=os.environ.get("DATABASE_URL"),
-        help="Postgres URL (default: $DATABASE_URL or postgresql:///agent_memory)",
+        help=f"Postgres URL (default: $DATABASE_URL or {DEFAULT_DATABASE_URL})",
     )
     parser.add_argument(
         "--telemetry-db", default=DEFAULT_TELEMETRY_DB,
@@ -190,6 +190,17 @@ def _db_error_class() -> type[BaseException]:
     return psycopg.Error
 
 
+def _assert_service_authority(conn) -> None:
+    """Fail closed when the database identity cannot use service RLS policies."""
+    row = conn.execute(
+        "select memory.is_service_role() as is_service_role",
+    ).fetchone()
+    if not row or not row["is_service_role"]:
+        raise PermissionError(
+            "hygiene worker requires a trusted database service role",
+        )
+
+
 def _run_pass(
     database_url: str,
     dry_run: bool,
@@ -214,6 +225,7 @@ def _run_pass(
     with psycopg.connect(database_url, row_factory=dict_row) as conn:
         conn.execute("select set_config('app.current_role', 'service', false)")
         conn.execute("select set_config('app.current_user', %s, false)", (service_user_id,))
+        _assert_service_authority(conn)
         rows = conn.execute("select * from memory.run_hygiene_pass()").fetchall()
 
     return [
@@ -287,7 +299,7 @@ def _execute_one_pass(
             args.dry_run,
             service_user_id=args.service_user_id,
         )
-    except (db_error_class, ImportError) as exc:
+    except (db_error_class, ImportError, PermissionError) as exc:
         _LOGGER.error("hygiene pass %d failed: %s", pass_count, exc)
         if args.once:
             return 2

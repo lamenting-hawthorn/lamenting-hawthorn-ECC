@@ -15,6 +15,9 @@
   per-pass metrics to the local telemetry database.
 
   Replace <PYTHON_PATH>, <REPO_ROOT>, and <HOME> below before loading.
+  The DATABASE_URL must authenticate as a trusted database service
+  identity such as agent_memory_service; setting app.current_role alone
+  is not sufficient under forced RLS.
 
   To install:
     cp com.ecc.hygiene.plist ~/Library/LaunchAgents/
@@ -43,7 +46,7 @@
     <key>EnvironmentVariables</key>
     <dict>
         <key>DATABASE_URL</key>
-        <string>postgresql:///agent_memory</string>
+        <string>postgresql://agent_memory_service@/agent_memory</string>
         <key>PYTHONUNBUFFERED</key>
         <string>1</string>
     </dict>

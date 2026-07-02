@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 import unittest
 from pathlib import Path
 
@@ -118,6 +119,7 @@ class TestResolveUrls(unittest.TestCase):
         try:
             self.assertEqual(mod._resolve_database_url(args),
                              mod.DEFAULT_DATABASE_URL)
+            self.assertIn("agent_memory_service", mod.DEFAULT_DATABASE_URL)
         finally:
             if old is not None:
                 os.environ["DATABASE_URL"] = old
@@ -127,6 +129,88 @@ class TestResolveUrls(unittest.TestCase):
         args = mod._parse_args(["--telemetry-db", "~/my.db"])
         path = mod._resolve_telemetry_path(args)
         self.assertEqual(str(path), str(Path("~/my.db").expanduser()))
+
+
+class _FakeCursor:
+    def __init__(self, *, row=None, rows=None):
+        self._row = row
+        self._rows = rows or []
+
+    def fetchone(self):
+        return self._row
+
+    def fetchall(self):
+        return self._rows
+
+
+class _FakeConnection:
+    def __init__(self, *, trusted: bool):
+        self.trusted = trusted
+        self.calls: list[str] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def execute(self, sql, params=None):
+        self.calls.append(sql)
+        if "memory.is_service_role()" in sql:
+            return _FakeCursor(row={"is_service_role": self.trusted})
+        if "memory.run_hygiene_pass()" in sql:
+            return _FakeCursor(rows=[{"operation": "audit_log", "deleted_count": 1}])
+        return _FakeCursor()
+
+
+class TestRunPassAuthority(unittest.TestCase):
+    def _install_fake_psycopg(self, fake_conn):
+        old_psycopg = sys.modules.get("psycopg")
+        old_rows = sys.modules.get("psycopg.rows")
+        fake_psycopg = types.ModuleType("psycopg")
+        fake_psycopg.Error = RuntimeError
+        fake_psycopg.connect = lambda *args, **kwargs: fake_conn
+        fake_rows = types.ModuleType("psycopg.rows")
+        fake_rows.dict_row = object()
+        sys.modules["psycopg"] = fake_psycopg
+        sys.modules["psycopg.rows"] = fake_rows
+
+        def restore():
+            if old_psycopg is None:
+                sys.modules.pop("psycopg", None)
+            else:
+                sys.modules["psycopg"] = old_psycopg
+            if old_rows is None:
+                sys.modules.pop("psycopg.rows", None)
+            else:
+                sys.modules["psycopg.rows"] = old_rows
+
+        return restore
+
+    def test_run_pass_rejects_untrusted_service_context(self):
+        mod = _import_worker()
+        fake_conn = _FakeConnection(trusted=False)
+        restore = self._install_fake_psycopg(fake_conn)
+        try:
+            with self.assertRaises(PermissionError):
+                mod._run_pass("postgresql:///agent_memory", dry_run=False)
+        finally:
+            restore()
+
+        self.assertTrue(any("memory.is_service_role()" in sql for sql in fake_conn.calls))
+        self.assertFalse(any("memory.run_hygiene_pass()" in sql for sql in fake_conn.calls))
+
+    def test_run_pass_allows_trusted_service_context(self):
+        mod = _import_worker()
+        fake_conn = _FakeConnection(trusted=True)
+        restore = self._install_fake_psycopg(fake_conn)
+        try:
+            results = mod._run_pass("postgresql://agent_memory_service@/agent_memory", dry_run=False)
+        finally:
+            restore()
+
+        self.assertEqual(results, [mod.OperationResult(operation="audit_log", deleted_count=1)])
+        self.assertTrue(any("memory.run_hygiene_pass()" in sql for sql in fake_conn.calls))
 
 
 class TestFormatPassSummary(unittest.TestCase):
@@ -273,11 +357,20 @@ class TestSchemaHygieneSql(unittest.TestCase):
         )
         role_idx = source.index("set_config('app.current_role', 'service', false)")
         user_idx = source.index("set_config('app.current_user', %s, false)")
+        authority_idx = source.index("memory.is_service_role()")
         cleanup_idx = source.index(
             'conn.execute("select * from memory.run_hygiene_pass()")',
         )
         self.assertLess(role_idx, cleanup_idx)
         self.assertLess(user_idx, cleanup_idx)
+        self.assertLess(authority_idx, cleanup_idx)
+
+    def test_launchd_uses_trusted_service_identity(self):
+        plist = (REPO_ROOT / "docs" / "launchd" / "com.ecc.hygiene.plist").read_text(
+            encoding="utf-8",
+        )
+        self.assertIn("postgresql://agent_memory_service@/agent_memory", plist)
+        self.assertNotIn("<string>postgresql:///agent_memory</string>", plist)
 
 
 if __name__ == "__main__":

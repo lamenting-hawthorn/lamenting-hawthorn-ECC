@@ -64,6 +64,15 @@ One-shot pass (CI / manual):
 python scripts/hygiene-worker.py --once
 ```
 
+By default the worker connects with
+`postgresql://agent_memory_service@/agent_memory`. That database role
+must exist and authenticate successfully, or another trusted service
+identity accepted by `memory.is_service_role()` must be supplied via
+`DATABASE_URL` / `--database-url`. The worker sets
+`app.current_role=service` for RLS context, but it also verifies the
+actual database identity before running cleanup so an untrusted local
+OS-user connection cannot report a successful no-op pass.
+
 Daemon with 30-minute interval:
 
 ```bash
