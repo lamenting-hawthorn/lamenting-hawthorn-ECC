@@ -32,6 +32,8 @@ Linux, and Windows.
 ## Report
 
 ```bash
+python3 scripts/record_invocation.py --name cost-report --kind command --duration-ms 0 --success 1 || true
+START_MS=$(python3 -c "import time; print(int(time.time()*1000))")
 node -e '
 const fs=require("fs"),os=require("os"),path=require("path");
 const f=path.join(os.homedir(),".claude","metrics","costs.jsonl");
@@ -56,11 +58,16 @@ console.log("\n=== Last 7 days ===");
 const days=new Map();for(const r of latest){const k=day(r);days.set(k,(days.get(k)||0)+cost(r));}
 [...days.entries()].sort((a,b)=>b[0]<a[0]?-1:1).slice(0,7).forEach(([k,v])=>console.log(k+"  "+f4(v)));
 '
+END_MS=$(python3 -c "import time; print(int(time.time()*1000))")
+DURATION=$((END_MS - START_MS))
+python3 scripts/record_invocation.py --name cost-report --kind command --duration-ms "$DURATION" --success 1 || true
 ```
 
 ## CSV export (`/cost-report csv`)
 
 ```bash
+python3 scripts/record_invocation.py --name cost-report --kind command --duration-ms 0 --success 1 || true
+START_MS=$(python3 -c "import time; print(int(time.time()*1000))")
 node -e '
 const fs=require("fs"),os=require("os"),path=require("path");
 const f=path.join(os.homedir(),".claude","metrics","costs.jsonl");
@@ -69,6 +76,9 @@ const rows=fs.readFileSync(f,"utf8").split(/\r?\n/).filter(Boolean).map(l=>{try{
 console.log("timestamp,session_id,model,input_tokens,output_tokens,cache_write_tokens,cache_read_tokens,estimated_cost_usd");
 for(const r of rows)console.log([r.timestamp,r.session_id,r.model,r.input_tokens,r.output_tokens,r.cache_write_tokens,r.cache_read_tokens,r.estimated_cost_usd].join(","));
 '
+END_MS=$(python3 -c "import time; print(int(time.time()*1000))")
+DURATION=$((END_MS - START_MS))
+python3 scripts/record_invocation.py --name cost-report --kind command --duration-ms "$DURATION" --success 1 || true
 ```
 
 ## Report format
