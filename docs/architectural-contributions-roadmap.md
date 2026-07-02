@@ -40,7 +40,8 @@ which fail, which are slow, which are expensive. Skills are
 and command execution, records events to a local SQLite db
 (`~/.ecc/telemetry.db`), and exposes a `/telemetry-report` command
 showing top failures, biggest spenders, and dead weight. Hooks
-into the LLM client to record token usage per call.
+into the LLM client to record token usage per call. Local-first by
+design: no separate hosted service required.
 **Files:** `src/telemetry/collector.py`, `reports.py`,
 `commands/telemetry-report.md`, skill/command dispatch integration.
 **Effort:** Medium.
